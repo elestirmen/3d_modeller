@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Model Yöneticisi</title>
+    <meta name="description" content="3D model dosyalarınızı düzenleyin, etiketleyin ve önizleyin.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- ─── Header ──────────────────────────────────────────── -->
+    <header class="header" id="header">
+        <div class="header-left">
+            <div class="logo">
+                <span class="logo-icon">🧊</span>
+                <h1 class="logo-text">3D Model Yöneticisi</h1>
+            </div>
+        </div>
+        <div class="header-center">
+            <div class="search-box" id="searchBox">
+                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                </svg>
+                <input type="text" id="searchInput" placeholder="Model ara..." autocomplete="off">
+                <kbd class="search-kbd">Ctrl+K</kbd>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="stats" id="headerStats">
+                <div class="stat-item" id="statTotal">
+                    <span class="stat-value">—</span>
+                    <span class="stat-label">Model</span>
+                </div>
+                <div class="stat-item" id="statFavorites">
+                    <span class="stat-value">—</span>
+                    <span class="stat-label">Favori</span>
+                </div>
+                <div class="stat-item" id="statSize">
+                    <span class="stat-value">—</span>
+                    <span class="stat-label">Toplam</span>
+                </div>
+            </div>
+            <button class="btn-icon mobile-only" id="btnFilters" title="Filtreler">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="4" y1="6" x2="20" y2="6"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="10" y1="18" x2="14" y2="18"/>
+                </svg>
+            </button>
+            <button class="btn-icon" id="btnRescan" title="Yeniden Tara">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                    <path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                    <path d="M16 21h5v-5"/>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- ─── Main Layout ─────────────────────────────────────── -->
+    <main class="main-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-mobile-bar">
+                <h2 class="sidebar-mobile-title">Filtreler</h2>
+                <button class="btn-icon sidebar-close" id="sidebarClose" title="Kapat">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="sidebar-section">
+                <h3 class="sidebar-title">Filtreler</h3>
+                <div class="filter-group">
+                    <button class="filter-btn active" data-filter="all" id="filterAll">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                        Tümü
+                    </button>
+                    <button class="filter-btn" data-filter="fav" id="filterFav">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                        Favoriler
+                    </button>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <h3 class="sidebar-title">Sıralama</h3>
+                <select class="sort-select" id="sortSelect">
+                    <option value="name">Ada Göre (A-Z)</option>
+                    <option value="size">Boyuta Göre</option>
+                    <option value="date">Tarihe Göre</option>
+                </select>
+            </div>
+
+            <div class="sidebar-section">
+                <h3 class="sidebar-title">Format</h3>
+                <div class="format-chips" id="formatChips">
+                    <button class="chip active" data-format="">Tümü</button>
+                    <button class="chip" data-format="stl">STL</button>
+                    <button class="chip" data-format="3mf">3MF</button>
+                    <button class="chip" data-format="obj">OBJ</button>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <h3 class="sidebar-title">Etiketler</h3>
+                <div class="tag-list" id="tagList">
+                    <!-- JS ile doldurulacak -->
+                </div>
+            </div>
+        </aside>
+        <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+        <!-- Grid -->
+        <section class="content" id="content">
+            <div class="content-header" id="contentHeader">
+                <span class="result-count" id="resultCount">Yükleniyor...</span>
+                <div class="view-toggle">
+                    <button class="btn-icon active" id="viewGrid" title="Izgara">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                    </button>
+                    <button class="btn-icon" id="viewList" title="Liste">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="model-grid" id="modelGrid">
+                <!-- JS ile doldurulacak -->
+            </div>
+            <div class="loading-overlay" id="loadingOverlay">
+                <div class="spinner"></div>
+                <p>Modeller yükleniyor...</p>
+            </div>
+        </section>
+    </main>
+
+    <!-- ─── 3D Preview Modal ──────────────────────────────────── -->
+    <div class="modal-overlay" id="previewModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modalTitle">Model Önizleme</h2>
+                <div class="modal-actions">
+                    <button class="btn-icon" id="modalPrinted" title="Yazdırıldı">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                    </button>
+                    <button class="btn-icon" id="modalFavorite" title="Favori">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    </button>
+                    <button class="btn-icon" id="modalClose" title="Kapat">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <div class="viewer-container" id="viewerContainer">
+                    <canvas id="viewer3D"></canvas>
+                    <div class="viewer-loading" id="viewerLoading">
+                        <div class="spinner"></div>
+                        <p>3D model yükleniyor...</p>
+                    </div>
+                    <div class="viewer-controls">
+                        <span>🖱️ Döndür</span>
+                        <span>🔍 Yakınlaştır</span>
+                        <span>⌨️ Sağ tık + sürükle: Kaydır</span>
+                    </div>
+                </div>
+                <div class="model-details" id="modelDetails">
+                    <div class="detail-section">
+                        <h4>Bilgiler</h4>
+                        <div class="detail-row">
+                            <span class="detail-label">Format</span>
+                            <span class="detail-value" id="detailFormat">—</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Boyut</span>
+                            <span class="detail-value" id="detailSize">—</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Dosya Sayısı</span>
+                            <span class="detail-value" id="detailFileCount">—</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Tür</span>
+                            <span class="detail-value" id="detailType">—</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Durum</span>
+                            <span class="detail-value" id="detailPrinted">Bekliyor</span>
+                        </div>
+                    </div>
+                    <div class="detail-section">
+                        <h4>Etiketler</h4>
+                        <div class="tag-editor" id="tagEditor">
+                            <div class="current-tags" id="currentTags"></div>
+                            <div class="tag-input-wrapper">
+                                <input type="text" id="tagInput" placeholder="Yeni etiket..." list="tagSuggestions">
+                                <datalist id="tagSuggestions"></datalist>
+                                <button class="btn-sm" id="addTagBtn">+</button>
+                            </div>
+                        </div>
+                        <div class="suggested-tags" id="suggestedTags"></div>
+                    </div>
+                    <div class="detail-section">
+                        <h4>Not</h4>
+                        <textarea class="note-input" id="noteInput" placeholder="Bu model hakkında not ekleyin..." rows="3"></textarea>
+                        <button class="btn-primary btn-sm" id="saveNoteBtn">Notu Kaydet</button>
+                    </div>
+                    <div class="detail-section" id="fileListSection">
+                        <h4>Dosyalar</h4>
+                        <ul class="file-list" id="fileList"></ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── Toast ───────────────────────────────────────────── -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
