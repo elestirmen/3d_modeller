@@ -1,0 +1,38 @@
+# Varsayilan: her seyi ignore et, sadece kod/dokuman/metin tabanli dosyalari al.
+*
+
+# Dizinleri gezebilmek icin klasorleri acik birak.
+!*/
+
+# Kaynak kodu, sablon, stil ve dokuman dosyalari
+!*.py
+!*.md
+!*.txt
+!*.html
+!*.css
+!*.js
+!*.json
+!*.yml
+!*.yaml
+!*.toml
+!*.ini
+!*.cfg
+!*.gitignore
+!.gitattributes
+!requirements.txt
+
+# Python/artifact ve yerel durum dosyalari
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Yerel veritabani ve IDE dosyalari
+db.json
+.idea/
+.vscode/
