@@ -49,6 +49,7 @@ const dom = {
     viewerContainer: $('#viewerContainer'),
     viewer3D: $('#viewer3D'),
     viewerLoading: $('#viewerLoading'),
+    viewerControls: $('#viewerControls'),
     detailFormat: $('#detailFormat'),
     detailSize: $('#detailSize'),
     detailFileCount: $('#detailFileCount'),
@@ -155,6 +156,10 @@ function renderPrintedState(model) {
     const printed = Boolean(model?.printed);
     dom.modalPrinted.classList.toggle('active', printed);
     dom.detailPrinted.textContent = printed ? 'Yazdırıldı' : 'Bekliyor';
+}
+
+function setViewerControlsVisible(visible) {
+    dom.viewerControls.hidden = !visible;
 }
 
 // ─── Load Data ─────────────────────────────────────────────
@@ -829,16 +834,18 @@ function openPreview(modelId) {
     // 3D viewer başlat
     const filePath = model.main_file || model.path;
     if (model.format === 'stl') {
+        setViewerControlsVisible(true);
         initViewer();
         loadSTL(`/api/file/${encodeURIComponent(filePath)}`);
     } else {
+        setViewerControlsVisible(false);
         dom.viewerLoading.classList.add('visible');
         dom.viewerLoading.innerHTML = `
             <div style="text-align: center;">
                 <div style="font-size: 4rem; margin-bottom: 16px;">${getFormatIcon(model.format)}</div>
                 <p style="color: var(--text-secondary); font-size: 0.9rem;">
-                    ${model.format.toUpperCase()} formatı için 3D önizleme<br>
-                    şu an yalnızca STL desteklenmektedir
+                    ${model.format.toUpperCase()} formatı katalogda ve filtrelerde desteklenir.<br>
+                    Etkileşimli 3D önizleme şu an yalnızca STL için mevcut.
                 </p>
             </div>
         `;
@@ -849,6 +856,7 @@ function closePreview() {
     dom.previewModal.classList.remove('visible');
     document.body.style.overflow = '';
     state.selectedModel = null;
+    setViewerControlsVisible(true);
     disposeViewer();
     renderGrid();
 }

@@ -1,10 +1,10 @@
 # 🧊 3D Model Yöneticisi
 
-Dağınık 3D model dosyalarını tarayan, kataloglayan ve yöneten web uygulaması. STL, 3MF, OBJ, GLTF, GLB, FBX ve PLY formatlarını destekler.
+Dağınık 3D model dosyalarını tarayan, kataloglayan ve yöneten web uygulaması. STL, 3MF, OBJ, GLTF, GLB, FBX ve PLY formatlarını kataloglar, filtreler ve listeler. Etkileşimli 3D önizleme şu an STL dosyaları için sunulur.
 
 ## Özellikler
 
-- **Otomatik tarama** — `3d models` klasöründeki tüm modelleri otomatik kataloglar
+- **Tarama kataloğu** — `3d models` klasöründeki tüm modelleri ilk açılışta kataloglar, `Yeniden Tara` ile günceller
 - **Akıllı etiketleme** — Dosya/klasör adından otomatik kategori önerisi
 - **Arama ve filtreleme** — İsim, etiket veya format ile arama
 - **Favoriler** — Sık kullandığınız modelleri işaretleyin
@@ -22,6 +22,8 @@ python app.py
 ```
 
 Tarayıcıda **http://localhost:5000** adresine gidin.
+
+İlk açılışta klasör taranır. Dosya sisteminde sonradan yaptığınız değişiklikleri arayüze yansıtmak için **Yeniden Tara** düğmesini kullanın.
 
 ## Klasör yapısı
 
@@ -62,6 +64,12 @@ Tarayıcıda **http://localhost:5000** adresine gidin.
 | `GET /api/tags` | Tüm etiketler |
 | `POST /api/scan` | Yeniden tara |
 | `GET /api/stats` | İstatistikler |
+
+## Test
+
+```bash
+python -m unittest -v
+```
 
 ## Gereksinimler
 

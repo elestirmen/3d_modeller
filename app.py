@@ -46,6 +46,35 @@ AUTO_TAGS = {
 }
 
 
+def default_db():
+    """Uygulama veritabanı için varsayılan şema."""
+    return {'models': {}, 'catalog': {}, 'last_scan': None}
+
+
+def normalize_db(db=None):
+    """Diskten gelen DB yapısını güncel şemaya hizala."""
+    normalized = default_db()
+    if not isinstance(db, dict):
+        return normalized
+
+    if isinstance(db.get('models'), dict):
+        normalized['models'] = db['models']
+
+    has_catalog = isinstance(db.get('catalog'), dict)
+    if has_catalog:
+        normalized['catalog'] = {
+            str(model_id): model_data
+            for model_id, model_data in db['catalog'].items()
+            if isinstance(model_data, dict)
+        }
+
+    last_scan = db.get('last_scan')
+    if has_catalog and isinstance(last_scan, (int, float)):
+        normalized['last_scan'] = float(last_scan)
+
+    return normalized
+
+
 def default_model_record(tags=None):
     """Yeni model kaydı için varsayılan kullanıcı verisi oluştur."""
     return {
@@ -113,6 +142,13 @@ def suggest_tags(name):
                 suggested.append(tag)
                 break
     return suggested
+
+
+def choose_project_main_file(files):
+    """Projede önizleme için en uygun ana dosyayı seç."""
+    preferred_files = [f for f in files if f.suffix.lower() == '.stl']
+    candidates = preferred_files or list(files)
+    return max(candidates, key=lambda f: (f.stat().st_size, str(f).lower()))
 
 
 def scan_models():
@@ -186,8 +222,8 @@ def scan_models():
         latest_modified = max(f.stat().st_mtime for f in proj['files'])
 
         file_list = [str(f.relative_to(MODELS_DIR)) for f in proj['files']]
-        # Ana dosyayı bul (en büyük STL veya ilk dosya)
-        main_file = max(proj['files'], key=lambda f: f.stat().st_size)
+        # STL varsa onu tercih et; yoksa en büyük dosyayı kullan.
+        main_file = choose_project_main_file(proj['files'])
         main_format = main_file.suffix.lower().lstrip('.')
 
         name = proj['name']
@@ -220,16 +256,29 @@ def scan_models():
 
 def load_db():
     """Veritabanını yükle, yoksa boş oluştur."""
-    if DB_PATH.exists():
+    if not DB_PATH.exists():
+        return default_db()
+
+    try:
         with open(DB_PATH, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {'models': {}, 'custom_tags': [], 'last_scan': None}
+            return normalize_db(json.load(f))
+    except (OSError, json.JSONDecodeError) as exc:
+        backup_path = None
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        candidate = DB_PATH.with_name(f'{DB_PATH.stem}.corrupt-{timestamp}{DB_PATH.suffix}')
+        try:
+            DB_PATH.replace(candidate)
+            backup_path = candidate
+        except OSError:
+            pass
+        app.logger.warning('DB yüklenemedi, yeni veritabanı ile devam ediliyor. backup=%s error=%s', backup_path, exc)
+        return default_db()
 
 
 def save_db(db):
     """Veritabanını kaydet."""
     with open(DB_PATH, 'w', encoding='utf-8') as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
+        json.dump(normalize_db(db), f, ensure_ascii=False, indent=2)
 
 
 def sync_db_with_scan(db, scanned):
@@ -248,14 +297,20 @@ def sync_db_with_scan(db, scanned):
     return changed
 
 
-def get_synced_state(persist=False):
+def get_synced_state(refresh=False):
     """Tarama sonuçları ile kullanıcı verilerini senkron halde döndür."""
     db = load_db()
-    scanned = scan_models()
+    should_scan = refresh or db.get('last_scan') is None
+    scanned = scan_models() if should_scan else db.get('catalog', {})
     changed = sync_db_with_scan(db, scanned)
 
-    if persist and (changed or db.get('last_scan') is None):
+    if should_scan:
+        db['catalog'] = scanned
         db['last_scan'] = time.time()
+        save_db(db)
+        return db, scanned
+
+    if changed:
         save_db(db)
 
     return db, scanned
@@ -266,6 +321,13 @@ def get_existing_model_or_404(model_id):
     db, scanned = get_synced_state()
     if model_id not in scanned:
         abort(404, description='Model not found')
+
+    primary_path = scanned[model_id].get('main_file') or scanned[model_id].get('path')
+    if primary_path and not (MODELS_DIR / primary_path).exists():
+        db, scanned = get_synced_state(refresh=True)
+        if model_id not in scanned:
+            abort(404, description='Model not found')
+
     return db, scanned, db['models'][model_id]
 
 
@@ -273,7 +335,7 @@ def ensure_scanned():
     """Eğer henüz taranmamışsa taramayı çalıştır ve DB'ye kaydet."""
     db = load_db()
     if db.get('last_scan') is None:
-        db, _ = get_synced_state(persist=True)
+        db, _ = get_synced_state(refresh=True)
     return db
 
 
@@ -403,7 +465,7 @@ def api_tags():
 @app.route('/api/scan', methods=['POST'])
 def api_rescan():
     """Klasörü yeniden tara."""
-    _, scanned = get_synced_state(persist=True)
+    _, scanned = get_synced_state(refresh=True)
     return jsonify({'success': True, 'total': len(scanned)})
 
 

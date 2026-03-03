@@ -32,7 +32,7 @@ class AppBehaviorTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_db_path = app.DB_PATH
         app.DB_PATH = Path(self.temp_dir.name) / 'db.json'
-        app.save_db({'models': {}, 'custom_tags': [], 'last_scan': None})
+        app.save_db(app.default_db())
         self.client = app.app.test_client()
 
     def tearDown(self):
@@ -57,7 +57,7 @@ class AppBehaviorTests(unittest.TestCase):
                 'real-model': {'tags': ['live'], 'favorite': False, 'note': '', 'printed': False},
                 'stale-model': {'tags': ['old'], 'favorite': True, 'note': '', 'printed': False},
             },
-            'custom_tags': [],
+            'catalog': {},
             'last_scan': None,
         })
 
@@ -75,7 +75,7 @@ class AppBehaviorTests(unittest.TestCase):
                 'real-model': {'tags': ['live'], 'favorite': True, 'note': '', 'printed': True},
                 'stale-model': {'tags': ['old'], 'favorite': True, 'note': '', 'printed': True},
             },
-            'custom_tags': [],
+            'catalog': {},
             'last_scan': None,
         })
 
@@ -90,6 +90,61 @@ class AppBehaviorTests(unittest.TestCase):
 
         self.assertEqual(tags_response.status_code, 200)
         self.assertEqual(tags_response.get_json()['tags'], [{'name': 'live', 'count': 1}])
+
+    def test_models_endpoint_uses_cached_catalog_after_initial_scan(self):
+        scanned = make_model('real-model')
+        with patch('app.scan_models', return_value=scanned) as scan_mock:
+            first_response = self.client.get('/api/models')
+            second_response = self.client.get('/api/models')
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(scan_mock.call_count, 1)
+        self.assertEqual(self.read_db()['catalog'], scanned)
+
+    def test_old_schema_db_without_catalog_triggers_refresh(self):
+        app.DB_PATH.write_text(json.dumps({
+            'models': {'legacy-model': {'tags': ['legacy'], 'favorite': False, 'note': '', 'printed': False}},
+            'last_scan': 123.0,
+        }), encoding='utf-8')
+
+        with patch('app.scan_models', return_value=make_model('real-model')) as scan_mock:
+            response = self.client.get('/api/models')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['total'], 1)
+        self.assertEqual(scan_mock.call_count, 1)
+        self.assertEqual(set(self.read_db()['catalog']), {'real-model'})
+
+    def test_invalid_db_file_recovers_and_backs_up_corrupt_data(self):
+        app.DB_PATH.write_text('{invalid', encoding='utf-8')
+
+        with patch('app.scan_models', return_value=make_model('real-model')):
+            response = self.client.get('/api/models')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['total'], 1)
+        backups = list(Path(self.temp_dir.name).glob('db.corrupt-*.json'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding='utf-8'), '{invalid')
+
+    def test_scan_prefers_stl_main_file_when_project_contains_multiple_formats(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        project_dir = models_root / 'mixed-project'
+        project_dir.mkdir(parents=True)
+        (project_dir / 'small.stl').write_bytes(b'abc')
+        (project_dir / 'large.3mf').write_bytes(b'0123456789')
+
+        original_models_dir = app.MODELS_DIR
+        app.MODELS_DIR = models_root
+        try:
+            scanned = app.scan_models()
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        model = next(iter(scanned.values()))
+        self.assertEqual(model['format'], 'stl')
+        self.assertEqual(model['main_file'], 'mixed-project\\small.stl')
 
 
 if __name__ == '__main__':
