@@ -1,5 +1,8 @@
+import io
 import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -145,6 +148,104 @@ class AppBehaviorTests(unittest.TestCase):
         model = next(iter(scanned.values()))
         self.assertEqual(model['format'], 'stl')
         self.assertEqual(model['main_file'], 'mixed-project\\small.stl')
+
+    def test_invalid_json_body_returns_400_without_clearing_tags(self):
+        scanned = make_model('real-model')
+        model_id = 'real-model'
+        app.save_db({
+            'models': {
+                model_id: {'tags': ['keep'], 'favorite': False, 'note': '', 'printed': False},
+            },
+            'catalog': scanned,
+            'last_scan': 1.0,
+        })
+
+        response = self.client.post(
+            f'/api/models/{model_id}/tags',
+            data='{bad',
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'Invalid JSON body')
+        self.assertEqual(self.read_db()['models'][model_id]['tags'], ['keep'])
+
+    def test_invalid_json_body_returns_400_without_clearing_note(self):
+        scanned = make_model('real-model')
+        model_id = 'real-model'
+        app.save_db({
+            'models': {
+                model_id: {'tags': [], 'favorite': False, 'note': 'keep', 'printed': False},
+            },
+            'catalog': scanned,
+            'last_scan': 1.0,
+        })
+
+        response = self.client.post(
+            f'/api/models/{model_id}/note',
+            data='{bad',
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['error'], 'Invalid JSON body')
+        self.assertEqual(self.read_db()['models'][model_id]['note'], 'keep')
+
+    def test_concurrent_mutations_preserve_both_updates(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        models_root.mkdir(parents=True)
+        (models_root / 'a.stl').write_bytes(b'abc')
+        (models_root / 'b.stl').write_bytes(b'def')
+
+        original_models_dir = app.MODELS_DIR
+        original_save = app._save_db_unlocked
+        app.MODELS_DIR = models_root
+        try:
+            self.client.get('/api/models')
+            model_a = app.generate_id('a.stl')
+            model_b = app.generate_id('b.stl')
+            statuses = []
+
+            def slow_save(db):
+                time.sleep(0.05)
+                return original_save(db)
+
+            def toggle_favorite():
+                client = app.app.test_client()
+                statuses.append(client.post(f'/api/models/{model_a}/favorite').status_code)
+
+            def toggle_printed():
+                client = app.app.test_client()
+                statuses.append(client.post(f'/api/models/{model_b}/printed').status_code)
+
+            with patch('app._save_db_unlocked', side_effect=slow_save):
+                first = threading.Thread(target=toggle_favorite)
+                second = threading.Thread(target=toggle_printed)
+                first.start()
+                second.start()
+                first.join()
+                second.join()
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        db = self.read_db()
+        self.assertEqual(sorted(statuses), [200, 200])
+        self.assertTrue(db['models'][model_a]['favorite'])
+        self.assertTrue(db['models'][model_b]['printed'])
+
+    def test_safe_console_text_replaces_unencodable_characters(self):
+        self.assertEqual(app.safe_console_text('🧊', encoding='cp1254'), '?')
+
+    def test_print_startup_banner_supports_legacy_console_encodings(self):
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding='cp1254', errors='strict')
+
+        app.print_startup_banner(stream=stream)
+        stream.flush()
+
+        banner = buffer.getvalue().decode('cp1254')
+        self.assertIn('3D Model Manager starting...', banner)
+        self.assertIn('Open http://localhost:5000', banner)
 
 
 if __name__ == '__main__':

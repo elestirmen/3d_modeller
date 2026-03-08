@@ -4,12 +4,15 @@ Dağınık 3D model dosyalarını tarayan, kataloglayan ve yöneten web uygulama
 """
 
 import os
+import sys
 import json
 import hashlib
+import tempfile
+import threading
 import time
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request, send_file, abort
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import BadRequest, HTTPException
 
 app = Flask(__name__)
 
@@ -17,6 +20,7 @@ app = Flask(__name__)
 BASE_DIR = Path(__file__).parent
 MODELS_DIR = BASE_DIR / "3d models"
 DB_PATH = BASE_DIR / "db.json"
+DB_LOCK = threading.RLock()
 
 # Desteklenen dosya formatları
 SUPPORTED_FORMATS = {'.stl', '.3mf', '.obj', '.gltf', '.glb', '.fbx', '.ply'}
@@ -254,7 +258,7 @@ def scan_models():
     return models
 
 
-def load_db():
+def _load_db_unlocked():
     """Veritabanını yükle, yoksa boş oluştur."""
     if not DB_PATH.exists():
         return default_db()
@@ -275,10 +279,28 @@ def load_db():
         return default_db()
 
 
-def save_db(db):
+def load_db():
+    """Veritabanını kilit koruması altında yükle."""
+    with DB_LOCK:
+        return _load_db_unlocked()
+
+
+def _save_db_unlocked(db):
     """Veritabanını kaydet."""
-    with open(DB_PATH, 'w', encoding='utf-8') as f:
-        json.dump(normalize_db(db), f, ensure_ascii=False, indent=2)
+    normalized = normalize_db(db)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=DB_PATH.parent, delete=False) as tmp_file:
+        json.dump(normalized, tmp_file, ensure_ascii=False, indent=2)
+        tmp_path = Path(tmp_file.name)
+
+    tmp_path.replace(DB_PATH)
+
+
+def save_db(db):
+    """Veritabanını kilit koruması altında kaydet."""
+    with DB_LOCK:
+        _save_db_unlocked(db)
 
 
 def sync_db_with_scan(db, scanned):
@@ -297,9 +319,9 @@ def sync_db_with_scan(db, scanned):
     return changed
 
 
-def get_synced_state(refresh=False):
+def _get_synced_state_unlocked(refresh=False):
     """Tarama sonuçları ile kullanıcı verilerini senkron halde döndür."""
-    db = load_db()
+    db = _load_db_unlocked()
     should_scan = refresh or db.get('last_scan') is None
     scanned = scan_models() if should_scan else db.get('catalog', {})
     changed = sync_db_with_scan(db, scanned)
@@ -307,36 +329,95 @@ def get_synced_state(refresh=False):
     if should_scan:
         db['catalog'] = scanned
         db['last_scan'] = time.time()
-        save_db(db)
+        _save_db_unlocked(db)
         return db, scanned
 
     if changed:
-        save_db(db)
+        _save_db_unlocked(db)
 
     return db, scanned
 
 
-def get_existing_model_or_404(model_id):
+def get_synced_state(refresh=False):
+    """Tarama sonuçları ile kullanıcı verilerini kilit koruması altında döndür."""
+    with DB_LOCK:
+        return _get_synced_state_unlocked(refresh=refresh)
+
+
+def _get_existing_model_or_404_unlocked(model_id):
     """Model gerçekten mevcutsa DB kaydını döndür, değilse 404 ver."""
-    db, scanned = get_synced_state()
+    db, scanned = _get_synced_state_unlocked()
     if model_id not in scanned:
         abort(404, description='Model not found')
 
     primary_path = scanned[model_id].get('main_file') or scanned[model_id].get('path')
     if primary_path and not (MODELS_DIR / primary_path).exists():
-        db, scanned = get_synced_state(refresh=True)
+        db, scanned = _get_synced_state_unlocked(refresh=True)
         if model_id not in scanned:
             abort(404, description='Model not found')
 
     return db, scanned, db['models'][model_id]
 
 
+def get_existing_model_or_404(model_id):
+    """Modeli kilit koruması altında doğrula ve DB kaydını döndür."""
+    with DB_LOCK:
+        return _get_existing_model_or_404_unlocked(model_id)
+
+
+def mutate_model_record(model_id, mutator):
+    """Bir model kaydını atomik olarak güncelle."""
+    with DB_LOCK:
+        db, _, record = _get_existing_model_or_404_unlocked(model_id)
+        response_payload = mutator(record)
+        _save_db_unlocked(db)
+        return response_payload
+
+
 def ensure_scanned():
     """Eğer henüz taranmamışsa taramayı çalıştır ve DB'ye kaydet."""
-    db = load_db()
-    if db.get('last_scan') is None:
-        db, _ = get_synced_state(refresh=True)
-    return db
+    with DB_LOCK:
+        db = _load_db_unlocked()
+        if db.get('last_scan') is None:
+            db, _ = _get_synced_state_unlocked(refresh=True)
+        return db
+
+
+def parse_json_object():
+    """JSON body'yi doğrula ve nesne olarak döndür."""
+    if not request.is_json:
+        abort(400, description='Expected JSON body')
+
+    try:
+        data = request.get_json(silent=False)
+    except BadRequest:
+        abort(400, description='Invalid JSON body')
+
+    if not isinstance(data, dict):
+        abort(400, description='JSON body must be an object')
+
+    return data
+
+
+def safe_console_text(value, encoding=None):
+    """Konsolun desteklemediği karakterleri güvenli şekilde dönüştür."""
+    text = str(value)
+    target_encoding = encoding or getattr(sys.stdout, 'encoding', None) or 'utf-8'
+    return text.encode(target_encoding, errors='replace').decode(target_encoding, errors='replace')
+
+
+def print_startup_banner(stream=None):
+    """Başlangıç bilgilerini terminal encoding'ine uygun bas."""
+    output = stream or sys.stdout
+    encoding = getattr(output, 'encoding', None)
+    for line in (
+        '',
+        '3D Model Manager starting...',
+        f'Model directory: {MODELS_DIR}',
+        'Open http://localhost:5000',
+        '',
+    ):
+        print(safe_console_text(line, encoding=encoding), file=output)
 
 
 @app.errorhandler(HTTPException)
@@ -410,43 +491,47 @@ def api_models():
 @app.route('/api/models/<model_id>/tags', methods=['POST'])
 def api_update_tags(model_id):
     """Modelin etiketlerini güncelle."""
-    db, _, record = get_existing_model_or_404(model_id)
-    data = request.get_json(silent=True) or {}
+    data = parse_json_object()
     tags = sanitize_tags(data.get('tags', []))
 
-    record['tags'] = tags
-    save_db(db)
-    return jsonify({'success': True, 'tags': tags})
+    def apply_tags(record):
+        record['tags'] = tags
+        return {'success': True, 'tags': tags}
+
+    return jsonify(mutate_model_record(model_id, apply_tags))
 
 
 @app.route('/api/models/<model_id>/favorite', methods=['POST'])
 def api_toggle_favorite(model_id):
     """Favori durumunu toggle et."""
-    db, _, record = get_existing_model_or_404(model_id)
-    record['favorite'] = not record['favorite']
-    save_db(db)
-    return jsonify({'success': True, 'favorite': record['favorite']})
+    def toggle(record):
+        record['favorite'] = not record['favorite']
+        return {'success': True, 'favorite': record['favorite']}
+
+    return jsonify(mutate_model_record(model_id, toggle))
 
 
 @app.route('/api/models/<model_id>/note', methods=['POST'])
 def api_update_note(model_id):
     """Modelin notunu güncelle."""
-    db, _, record = get_existing_model_or_404(model_id)
-    data = request.get_json(silent=True) or {}
+    data = parse_json_object()
     note = str(data.get('note', ''))
 
-    record['note'] = note
-    save_db(db)
-    return jsonify({'success': True, 'note': note})
+    def apply_note(record):
+        record['note'] = note
+        return {'success': True, 'note': note}
+
+    return jsonify(mutate_model_record(model_id, apply_note))
 
 
 @app.route('/api/models/<model_id>/printed', methods=['POST'])
 def api_toggle_printed(model_id):
     """Yazdırıldı durumunu toggle et."""
-    db, _, record = get_existing_model_or_404(model_id)
-    record['printed'] = not record.get('printed', False)
-    save_db(db)
-    return jsonify({'success': True, 'printed': record['printed']})
+    def toggle(record):
+        record['printed'] = not record.get('printed', False)
+        return {'success': True, 'printed': record['printed']}
+
+    return jsonify(mutate_model_record(model_id, toggle))
 
 
 @app.route('/api/tags')
@@ -512,7 +597,5 @@ def api_serve_file(filepath):
 # ─── Main ────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print("\n🧊 3D Model Yöneticisi başlatılıyor...")
-    print(f"📂 Model klasörü: {MODELS_DIR}")
-    print(f"🌐 http://localhost:5000\n")
+    print_startup_banner()
     app.run(debug=True, port=5000)
