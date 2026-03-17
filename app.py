@@ -24,6 +24,7 @@ DB_PATH = BASE_DIR / "db.json"
 DB_LOCK = threading.RLock()
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 5000
+GROUP_MODES = ('project', 'folder')
 
 # Desteklenen dosya formatları
 SUPPORTED_FORMATS = {'.stl', '.3mf', '.obj', '.gltf', '.glb', '.fbx', '.ply'}
@@ -55,7 +56,7 @@ AUTO_TAGS = {
 
 def default_db():
     """Uygulama veritabanı için varsayılan şema."""
-    return {'models': {}, 'catalog': {}, 'last_scan': None}
+    return {'models': {}, 'catalog': {}, 'catalogs': {}, 'last_scan': None}
 
 
 def coerce_int(value, default=0):
@@ -106,7 +107,7 @@ def normalize_catalog_record(model_id, record=None):
         'id': str(model_id),
         'name': str(record.get('name') or model_id),
         'display_name': str(record.get('display_name') or record.get('name') or model_id),
-        'type': 'project' if record.get('type') == 'project' else 'file',
+        'type': record.get('type') if record.get('type') in {'project', 'folder'} else 'file',
         'format': str(record.get('format', '')).lower(),
         'path': path,
         'size': size,
@@ -147,9 +148,21 @@ def normalize_db(db=None):
     if isinstance(db.get('models'), dict):
         normalized['models'] = db['models']
 
-    has_catalog = isinstance(db.get('catalog'), dict)
-    if has_catalog:
+    has_catalog = False
+    if isinstance(db.get('catalog'), dict):
         normalized['catalog'] = normalize_catalog(db.get('catalog'))
+        has_catalog = True
+
+    if isinstance(db.get('catalogs'), dict):
+        normalized['catalogs'] = {
+            str(group_mode): normalize_catalog(catalog)
+            for group_mode, catalog in db['catalogs'].items()
+            if str(group_mode) in GROUP_MODES and isinstance(catalog, dict)
+        }
+
+    if not has_catalog and 'project' in normalized['catalogs']:
+        normalized['catalog'] = normalized['catalogs']['project']
+        has_catalog = True
 
     last_scan = db.get('last_scan')
     if has_catalog and isinstance(last_scan, (int, float)):
@@ -205,6 +218,37 @@ def generate_id(path_str):
     return hashlib.md5(path_str.encode('utf-8')).hexdigest()[:12]
 
 
+def parse_group_mode(group_mode=None, default='folder'):
+    """Geçerli gruplama modunu doğrula."""
+    normalized = str(group_mode or default).strip().lower()
+    if normalized not in GROUP_MODES:
+        abort(400, description='Invalid group mode')
+    return normalized
+
+
+def build_model_id(key, group_mode='project'):
+    """Görünüm moduna göre kararlı model ID üret."""
+    base_id = generate_id(key)
+    return base_id if group_mode == 'project' else f'{group_mode}:{base_id}'
+
+
+def infer_group_mode_from_model_id(model_id):
+    """Model ID'sinden hangi görünüm moduna ait olduğunu çöz."""
+    model_id = str(model_id)
+    for group_mode in GROUP_MODES:
+        if group_mode != 'project' and model_id.startswith(f'{group_mode}:'):
+            return group_mode
+    return 'project'
+
+
+def model_id_matches_group_mode(model_id, group_mode):
+    """DB kaydının ilgili görünüm moduna ait olup olmadığını belirle."""
+    model_id = str(model_id)
+    if group_mode == 'project':
+        return ':' not in model_id
+    return model_id.startswith(f'{group_mode}:')
+
+
 def format_size(size_bytes):
     """Byte cinsinden boyutu okunabilir formata çevir."""
     if size_bytes < 1024:
@@ -234,20 +278,20 @@ def choose_project_main_file(files):
     return max(candidates, key=lambda f: (f.stat().st_size, str(f).lower()))
 
 
-def scan_models():
-    """3D model klasörünü tara ve tüm modelleri katalogla."""
+def scan_models(group_mode='project'):
+    """3D model klasörünü tara ve istenen görünüm için katalog üret."""
+    group_mode = parse_group_mode(group_mode)
     models = {}
 
     if not MODELS_DIR.exists():
         return models
 
-    # Önce klasörleri "proje" olarak grupla
-    projects = {}  # klasör yolu -> dosya listesi
+    # Görünüm moduna göre klasörleri grupla
+    grouped_items = {}  # klasör yolu -> dosya listesi
     root_files = []  # kök dizindeki tekil dosyalar
 
     for root, _dirs, files in os.walk(MODELS_DIR):
         root_path = Path(root)
-        rel_root = root_path.relative_to(MODELS_DIR)
 
         for f in files:
             file_path = root_path / f
@@ -259,23 +303,25 @@ def scan_models():
             if root_path == MODELS_DIR:
                 root_files.append(file_path)
             else:
-                # En üst alt klasörü bul (proje klasörü)
-                parts = rel_root.parts
-                project_dir = MODELS_DIR / parts[0]
-                project_key = str(project_dir)
+                if group_mode == 'folder':
+                    group_dir = root_path
+                else:
+                    rel_root = root_path.relative_to(MODELS_DIR)
+                    group_dir = MODELS_DIR / rel_root.parts[0]
 
-                if project_key not in projects:
-                    projects[project_key] = {
-                        'name': parts[0],
-                        'path': project_dir,
+                group_key = relative_model_path(group_dir)
+                if group_key not in grouped_items:
+                    grouped_items[group_key] = {
+                        'name': group_dir.name,
+                        'path': group_dir,
                         'files': []
                     }
-                projects[project_key]['files'].append(file_path)
+                grouped_items[group_key]['files'].append(file_path)
 
     # Kök dizindeki tekil dosyaları model olarak ekle
     for fp in root_files:
         rel_path = relative_model_path(fp)
-        model_id = generate_id(rel_path)
+        model_id = build_model_id(rel_path, group_mode=group_mode)
         stat = fp.stat()
         name = fp.stem
         # Çift uzantılı dosyaları temizle (örn: "file.stl.stl")
@@ -297,19 +343,19 @@ def scan_models():
             'suggested_tags': suggest_tags(name),
         })
 
-    # Proje klasörlerini model olarak ekle
-    for proj in projects.values():
-        project_path = relative_model_path(proj['path'])
-        model_id = generate_id(project_path)
-        total_size = sum(f.stat().st_size for f in proj['files'])
-        latest_modified = max(f.stat().st_mtime for f in proj['files'])
+    # Gruplanmış klasörleri model olarak ekle
+    for grouped in grouped_items.values():
+        group_path = relative_model_path(grouped['path'])
+        model_id = build_model_id(group_path, group_mode=group_mode)
+        total_size = sum(f.stat().st_size for f in grouped['files'])
+        latest_modified = max(f.stat().st_mtime for f in grouped['files'])
 
-        file_list = [relative_model_path(f) for f in proj['files']]
+        file_list = [relative_model_path(f) for f in grouped['files']]
         # STL varsa onu tercih et; yoksa en büyük dosyayı kullan.
-        main_file = choose_project_main_file(proj['files'])
+        main_file = choose_project_main_file(grouped['files'])
         main_format = main_file.suffix.lower().lstrip('.')
 
-        name = proj['name']
+        name = grouped['name']
         # Thingiverse tarzı numaraları temizle
         clean_name = name
         for sep in [' - ', ' -']:
@@ -321,9 +367,9 @@ def scan_models():
             'id': model_id,
             'name': name,
             'display_name': clean_name,
-            'type': 'project',
+            'type': 'folder' if group_mode == 'folder' else 'project',
             'format': main_format,
-            'path': project_path,
+            'path': group_path,
             'main_file': relative_model_path(main_file),
             'size': total_size,
             'size_display': format_size(total_size),
@@ -381,10 +427,15 @@ def save_db(db):
         _save_db_unlocked(db)
 
 
-def sync_db_with_scan(db, scanned):
-    """DB'deki model kayıtlarını güncel tarama ile hizala."""
+def sync_db_with_scan(db, scanned, group_mode='project'):
+    """İlgili görünüm modundaki model kayıtlarını güncel tarama ile hizala."""
+    group_mode = parse_group_mode(group_mode)
     current_models = db.get('models', {})
-    synced_models = {}
+    synced_models = {
+        mid: record
+        for mid, record in current_models.items()
+        if not model_id_matches_group_mode(mid, group_mode)
+    }
 
     for mid, mdata in scanned.items():
         synced_models[mid] = normalize_model_record(
@@ -397,40 +448,74 @@ def sync_db_with_scan(db, scanned):
     return changed
 
 
-def _get_synced_state_unlocked(refresh=False):
-    """Tarama sonuçları ile kullanıcı verilerini senkron halde döndür."""
-    db = _load_db_unlocked()
-    should_scan = refresh or db.get('last_scan') is None
-    scanned = normalize_catalog(scan_models()) if should_scan else normalize_catalog(db.get('catalog', {}))
-    changed = sync_db_with_scan(db, scanned)
+def get_catalog_for_mode(db, group_mode='project'):
+    """İstenen görünüm modunun katalogunu döndür."""
+    group_mode = parse_group_mode(group_mode)
+    if group_mode == 'project':
+        return db.get('catalog', {})
+    return db.get('catalogs', {}).get(group_mode)
 
-    if should_scan:
+
+def set_catalog_for_mode(db, scanned, group_mode='project'):
+    """İstenen görünüm modunun katalogunu güncelle."""
+    group_mode = parse_group_mode(group_mode)
+    if group_mode == 'project':
         db['catalog'] = scanned
+        return
+    db.setdefault('catalogs', {})[group_mode] = scanned
+
+
+def refresh_all_catalogs_unlocked(db):
+    """Tüm görünüm modları için katalogları yeniden üret."""
+    for group_mode in GROUP_MODES:
+        scanned = normalize_catalog(scan_models(group_mode=group_mode))
+        set_catalog_for_mode(db, scanned, group_mode=group_mode)
+        sync_db_with_scan(db, scanned, group_mode=group_mode)
+    db['last_scan'] = time.time()
+
+
+def _get_synced_state_unlocked(refresh=False, group_mode='folder'):
+    """Tarama sonuçları ile kullanıcı verilerini senkron halde döndür."""
+    group_mode = parse_group_mode(group_mode)
+    db = _load_db_unlocked()
+    should_refresh_all = refresh or db.get('last_scan') is None
+    if should_refresh_all:
+        refresh_all_catalogs_unlocked(db)
+        _save_db_unlocked(db)
+        return db, get_catalog_for_mode(db, group_mode=group_mode)
+
+    scanned = get_catalog_for_mode(db, group_mode=group_mode)
+    if scanned is None:
+        scanned = normalize_catalog(scan_models(group_mode=group_mode))
+        set_catalog_for_mode(db, scanned, group_mode=group_mode)
         db['last_scan'] = time.time()
+        sync_db_with_scan(db, scanned, group_mode=group_mode)
         _save_db_unlocked(db)
         return db, scanned
 
+    changed = sync_db_with_scan(db, scanned, group_mode=group_mode)
     if changed:
         _save_db_unlocked(db)
 
     return db, scanned
 
 
-def get_synced_state(refresh=False):
+def get_synced_state(refresh=False, group_mode='folder'):
     """Tarama sonuçları ile kullanıcı verilerini kilit koruması altında döndür."""
     with DB_LOCK:
-        return _get_synced_state_unlocked(refresh=refresh)
+        return _get_synced_state_unlocked(refresh=refresh, group_mode=group_mode)
 
 
 def _get_existing_model_or_404_unlocked(model_id):
     """Model gerçekten mevcutsa DB kaydını döndür, değilse 404 ver."""
-    db, scanned = _get_synced_state_unlocked()
+    group_mode = infer_group_mode_from_model_id(model_id)
+    db, scanned = _get_synced_state_unlocked(group_mode=group_mode)
     if model_id not in scanned:
         abort(404, description='Model not found')
 
     primary_path = scanned[model_id].get('main_file') or scanned[model_id].get('path')
     if primary_path and not (MODELS_DIR / primary_path).exists():
-        db, scanned = _get_synced_state_unlocked(refresh=True)
+        db, scanned = _get_synced_state_unlocked(refresh=True, group_mode=group_mode)
         if model_id not in scanned:
             abort(404, description='Model not found')
 
@@ -548,7 +633,8 @@ def index():
 @app.route('/api/models')
 def api_models():
     """Model listesini döndür. Query parametreleri: q, tag, format, sort, fav."""
-    db, scanned = get_synced_state()
+    group_mode = parse_group_mode(request.args.get('group'))
+    db, scanned = get_synced_state(group_mode=group_mode)
 
     q = request.args.get('q', '').lower().strip()
     tag_filter = request.args.get('tag', '').strip()
@@ -643,7 +729,8 @@ def api_toggle_printed(model_id):
 @app.route('/api/tags')
 def api_tags():
     """Tüm kullanılan etiketleri ve sayılarını döndür."""
-    db, scanned = get_synced_state()
+    group_mode = parse_group_mode(request.args.get('group'))
+    db, scanned = get_synced_state(group_mode=group_mode)
     tag_counts = {}
     for mid in scanned:
         for tag in db['models'][mid].get('tags', []):
@@ -656,14 +743,16 @@ def api_tags():
 @app.route('/api/scan', methods=['POST'])
 def api_rescan():
     """Klasörü yeniden tara."""
-    _, scanned = get_synced_state(refresh=True)
+    group_mode = parse_group_mode(request.args.get('group'))
+    _, scanned = get_synced_state(refresh=True, group_mode=group_mode)
     return jsonify({'success': True, 'total': len(scanned)})
 
 
 @app.route('/api/stats')
 def api_stats():
     """İstatistikleri döndür."""
-    db, scanned = get_synced_state()
+    group_mode = parse_group_mode(request.args.get('group'))
+    db, scanned = get_synced_state(group_mode=group_mode)
 
     total = len(scanned)
     favorites = sum(1 for mid in scanned if db['models'][mid].get('favorite'))

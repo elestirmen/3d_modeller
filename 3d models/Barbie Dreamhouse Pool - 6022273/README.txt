@@ -1,0 +1,4 @@
+Barbie Dreamhouse Pool by xanatos451 on Thingiverse: https://www.thingiverse.com/thing:6022273
+
+Summary:
+A friend of mine was missing a few parts (specifically the pool) for a Barbie Dreamhouse. Due to the difficulty in finding a reasonably priced replacement part, and the believe I could make a better looking one, I printed one out of transparent blue PETG as pictured. I even added a pool ladder printed in white PETG for a little something extra. I'd like to get around to adding pool lights even, but for now, this is what I had time to work with. I'll update with a v2 if I ever get around to adding some simple electronics to control a set of timed pool lights to embed in the walls. EDIT: Added STEP files of the pool and ladder so anyone can make improvements as needed.

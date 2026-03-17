@@ -10,6 +10,7 @@ const state = {
     currentTag: '',
     currentFormat: '',
     currentSort: 'name',
+    currentGroupMode: localStorage.getItem('groupMode') === 'project' ? 'project' : 'folder',
     searchQuery: '',
     viewMode: 'grid',
     selectedModel: null,
@@ -36,6 +37,7 @@ const dom = {
     loadingOverlay: $('#loadingOverlay'),
     resultCount: $('#resultCount'),
     sortSelect: $('#sortSelect'),
+    groupSelect: $('#groupSelect'),
     sidebar: $('#sidebar'),
     sidebarClose: $('#sidebarClose'),
     sidebarBackdrop: $('#sidebarBackdrop'),
@@ -88,6 +90,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (saved) state.thumbCache = JSON.parse(saved);
         }
     } catch (e) { /* pass */ }
+
+    if (dom.groupSelect) {
+        dom.groupSelect.value = state.currentGroupMode;
+    }
 
     loadModels();
     loadStats();
@@ -162,6 +168,23 @@ function setViewerControlsVisible(visible) {
     dom.viewerControls.hidden = !visible;
 }
 
+function withGroupMode(path) {
+    const separator = path.includes('?') ? '&' : '?';
+    return `${path}${separator}group=${encodeURIComponent(state.currentGroupMode)}`;
+}
+
+function getModelTypeLabel(type) {
+    if (type === 'folder') return '📂 Klasör';
+    if (type === 'project') return '📁 Proje';
+    return '📄 Dosya';
+}
+
+function getModelDetailType(type) {
+    if (type === 'folder') return 'Klasör Grubu';
+    if (type === 'project') return 'Proje (Klasör)';
+    return 'Tekil Dosya';
+}
+
 // ─── Load Data ─────────────────────────────────────────────
 async function loadModels() {
     showLoading(true);
@@ -172,6 +195,7 @@ async function loadModels() {
         if (state.currentFormat) params.set('format', state.currentFormat);
         if (state.currentSort) params.set('sort', state.currentSort);
         if (state.currentFilter === 'fav') params.set('fav', '1');
+        params.set('group', state.currentGroupMode);
 
         const data = await api(`/api/models?${params}`);
         state.models = data.models;
@@ -187,7 +211,7 @@ async function loadModels() {
 
 async function loadStats() {
     try {
-        const data = await api('/api/stats');
+        const data = await api(withGroupMode('/api/stats'));
         dom.statTotal.querySelector('.stat-value').textContent = data.total;
         dom.statFavorites.querySelector('.stat-value').textContent = data.favorites;
         dom.statSize.querySelector('.stat-value').textContent = data.total_size;
@@ -196,7 +220,7 @@ async function loadStats() {
 
 async function loadTags() {
     try {
-        const data = await api('/api/tags');
+        const data = await api(withGroupMode('/api/tags'));
         renderTags(data.tags);
     } catch (e) { /* pass */ }
 }
@@ -221,7 +245,7 @@ function renderGrid() {
         const fileCount = m.file_count > 1 ? `<span class="file-count-badge">${m.file_count} dosya</span>` : '';
         const displayName = escapeHtml(m.display_name || m.name);
         const rawName = escapeHtml(m.name || '');
-        const metaType = m.type === 'project' ? '📁 Proje' : '📄 Dosya';
+        const metaType = getModelTypeLabel(m.type);
 
         // Thumbnail durumunu kontrol et
         const cached = state.thumbCache[m.id];
@@ -570,6 +594,16 @@ function bindEvents() {
         if (isMobileViewport()) setSidebarOpen(false);
     });
 
+    dom.groupSelect?.addEventListener('change', async () => {
+        state.currentGroupMode = dom.groupSelect.value === 'folder' ? 'folder' : 'project';
+        localStorage.setItem('groupMode', state.currentGroupMode);
+        closePreview();
+        await loadModels();
+        loadStats();
+        loadTags();
+        if (isMobileViewport()) setSidebarOpen(false);
+    });
+
     // Format filtreleri
     dom.formatChips.addEventListener('click', (e) => {
         const chip = e.target.closest('.chip');
@@ -648,7 +682,7 @@ function bindEvents() {
     dom.btnRescan.addEventListener('click', async () => {
         dom.btnRescan.classList.add('spinning');
         try {
-            await api('/api/scan', { method: 'POST' });
+            await api(withGroupMode('/api/scan'), { method: 'POST' });
             // Thumbnail cache'i temizle (yeni dosyalar olabilir)
             state.thumbCache = {};
             localStorage.removeItem('thumbCache');
@@ -821,7 +855,7 @@ function openPreview(modelId) {
     dom.detailFormat.textContent = model.format.toUpperCase();
     dom.detailSize.textContent = model.size_display;
     dom.detailFileCount.textContent = model.file_count;
-    dom.detailType.textContent = model.type === 'project' ? 'Proje (Klasör)' : 'Tekil Dosya';
+    dom.detailType.textContent = getModelDetailType(model.type);
     dom.noteInput.value = model.note || '';
 
     renderModalTags();
@@ -906,7 +940,7 @@ async function addSuggestedTag(tag) {
 
 async function loadTagSuggestions() {
     try {
-        const data = await api('/api/tags');
+        const data = await api(withGroupMode('/api/tags'));
         dom.tagSuggestions.replaceChildren();
         data.tags.forEach((tag) => {
             const option = document.createElement('option');

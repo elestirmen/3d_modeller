@@ -1,0 +1,4 @@
+WILLYS JEEP - Fully printable by Soarpix on Thingiverse: https://www.thingiverse.com/thing:4834434
+
+Summary:
+You will find more of my designs here:Maker World - https://makerworld.com/en/@soarpixCults3D - https://cults3d.com/en/users/soarpix/3d-modelsCustom WILLYS JEEPThe body, chassi and steering wheel was printed with bed support.Everything else was printed without support.Resolution: 0,2Supports: YesInfill: 15%Filament Material: PLA5mm steel axle length = 75mm (or use the printable one) If you have any questions, let me know in the comments or on my youtube channelHAPPY PRINTING!Click here to wach the video =) https://youtu.be/eVaXzeeD8cM
