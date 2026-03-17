@@ -14,17 +14,19 @@ const state = {
     searchQuery: '',
     viewMode: 'grid',
     selectedModel: null,
+    selectedFilePath: '',
     // Three.js (modal viewer)
     scene: null,
     camera: null,
     renderer: null,
     controls: null,
-    currentMesh: null,
+    currentObject: null,
     animationId: null,
     // Thumbnails
     thumbCache: {},        // modelId -> dataURL
     thumbQueue: [],        // bekleme kuyruğu
     thumbBusy: false,
+    thumbScheduled: false,
 };
 
 // ─── DOM Refs ──────────────────────────────────────────────
@@ -68,6 +70,7 @@ const dom = {
     toastContainer: $('#toastContainer'),
     btnFilters: $('#btnFilters'),
     btnRescan: $('#btnRescan'),
+    btnRescanLabel: $('#btnRescanLabel'),
     viewGrid: $('#viewGrid'),
     viewList: $('#viewList'),
     statTotal: $('#statTotal'),
@@ -149,10 +152,55 @@ function renderResultCount(total) {
     dom.resultCount.append(strong, ' model bulundu');
 }
 
+function getFileName(filePath) {
+    return String(filePath).split('\\').pop().split('/').pop();
+}
+
+function getFileFormat(filePath) {
+    const fileName = getFileName(filePath);
+    const lastDot = fileName.lastIndexOf('.');
+    if (lastDot === -1) return '';
+    return fileName.slice(lastDot + 1).toLowerCase();
+}
+
+function buildFileUrl(filePath, options = {}) {
+    const params = new URLSearchParams();
+    if (options.download) params.set('download', '1');
+    const suffix = params.toString() ? `?${params}` : '';
+    return `/api/file/${encodeURIComponent(filePath)}${suffix}`;
+}
+
+function buildPreviewUrl(filePath) {
+    return `/api/preview/${encodeURIComponent(filePath)}`;
+}
+
 function renderFileList(files = []) {
     const items = files.map((filePath) => {
-        const fileName = filePath.split('\\').pop().split('/').pop();
-        return `<li title="${escapeHtml(filePath)}">${escapeHtml(fileName)}</li>`;
+        const isActive = filePath === state.selectedFilePath;
+        const fileFormat = getFileFormat(filePath).toUpperCase() || 'DOSYA';
+        const fileName = getFileName(filePath);
+        return `
+            <li class="file-item ${isActive ? 'active' : ''}">
+                <button
+                    type="button"
+                    class="file-select"
+                    data-action="select-file"
+                    data-file-path="${escapeHtml(filePath)}"
+                    title="${escapeHtml(filePath)}"
+                >
+                    <span class="file-name">${escapeHtml(fileName)}</span>
+                    <span class="file-format">${escapeHtml(fileFormat)}</span>
+                </button>
+                <a
+                    class="file-download"
+                    href="${buildFileUrl(filePath, { download: true })}"
+                    data-action="download-file"
+                    data-file-path="${escapeHtml(filePath)}"
+                >
+                    İndir
+                </a>
+            </li>
+        `;
     }).join('');
 
     dom.fileList.innerHTML = items;
@@ -183,6 +231,47 @@ function getModelDetailType(type) {
     if (type === 'folder') return 'Klasör Grubu';
     if (type === 'project') return 'Proje (Klasör)';
     return 'Tekil Dosya';
+}
+
+function renderViewerMessage(icon, message) {
+    setViewerControlsVisible(false);
+    dom.viewerLoading.classList.add('visible');
+    dom.viewerLoading.innerHTML = `
+        <div style="text-align: center;">
+            <div style="font-size: 4rem; margin-bottom: 16px;">${icon}</div>
+            <p style="color: var(--text-secondary); font-size: 0.9rem;">
+                ${message}
+            </p>
+        </div>
+    `;
+}
+
+function showSelectedFile(filePath) {
+    if (!state.selectedModel || !filePath) return;
+
+    state.selectedFilePath = filePath;
+    renderFileList(state.selectedModel.files || []);
+
+    const fileFormat = getFileFormat(filePath) || state.selectedModel.format;
+    dom.detailFormat.textContent = fileFormat.toUpperCase();
+
+    if (fileFormat === 'stl' || fileFormat === '3mf') {
+        showViewerLoading(`${fileFormat.toUpperCase()} model yükleniyor...`);
+        setViewerControlsVisible(true);
+        if (!state.renderer) initViewer();
+        if (fileFormat === 'stl') {
+            loadSTL(buildFileUrl(filePath), filePath);
+        } else {
+            load3MF(buildFileUrl(filePath), filePath);
+        }
+        return;
+    }
+
+    disposeViewer();
+    renderViewerMessage(
+        getFormatIcon(fileFormat),
+        `${fileFormat.toUpperCase()} dosyası seçildi. Etkileşimli 3D önizleme şu an yalnızca STL ve 3MF için mevcut.`,
+    );
 }
 
 // ─── Load Data ─────────────────────────────────────────────
@@ -485,7 +574,35 @@ function setupThumbnailObserver() {
 function queueThumbnail(modelId) {
     if (state.thumbQueue.includes(modelId)) return;
     state.thumbQueue.push(modelId);
-    processThumbQueue();
+    scheduleThumbQueue();
+}
+
+function scheduleThumbQueue() {
+    if (state.thumbScheduled) return;
+    state.thumbScheduled = true;
+
+    const run = () => {
+        state.thumbScheduled = false;
+        processThumbQueue();
+    };
+
+    if ('requestIdleCallback' in window) {
+        window.requestIdleCallback(run, { timeout: 150 });
+        return;
+    }
+
+    setTimeout(run, 32);
+}
+
+function waitForIdle(timeout = 100) {
+    return new Promise((resolve) => {
+        if ('requestIdleCallback' in window) {
+            window.requestIdleCallback(() => resolve(), { timeout });
+            return;
+        }
+
+        setTimeout(resolve, Math.min(timeout, 32));
+    });
 }
 
 async function processThumbQueue() {
@@ -537,7 +654,7 @@ async function processThumbQueue() {
         }
 
         // Bir sonraki thumbnail için kısa bekleme (UI'ı bloklamayalım)
-        await new Promise(r => setTimeout(r, 50));
+        await waitForIdle(120);
     }
 
     state.thumbBusy = false;
@@ -650,6 +767,13 @@ function bindEvents() {
         if (card) openPreview(card.dataset.id);
     });
 
+    dom.fileList.addEventListener('click', (e) => {
+        const selectButton = e.target.closest('[data-action="select-file"]');
+        if (selectButton) {
+            showSelectedFile(selectButton.dataset.filePath || '');
+        }
+    });
+
     dom.currentTags.addEventListener('click', (e) => {
         const removeButton = e.target.closest('.remove-tag');
         if (removeButton) {
@@ -678,22 +802,39 @@ function bindEvents() {
         dom.modelGrid.classList.add('list-view');
     });
 
-    // Yeniden tara
+// Yeniden tara
     dom.btnRescan.addEventListener('click', async () => {
+        if (dom.btnRescan.disabled) return;
+
         dom.btnRescan.classList.add('spinning');
+        dom.btnRescan.disabled = true;
+        dom.btnRescan.setAttribute('aria-busy', 'true');
+        if (dom.btnRescanLabel) {
+            dom.btnRescanLabel.textContent = 'Taranıyor...';
+        }
+
         try {
-            await api(withGroupMode('/api/scan'), { method: 'POST' });
+            const result = await api(withGroupMode('/api/scan'), { method: 'POST' });
             // Thumbnail cache'i temizle (yeni dosyalar olabilir)
             state.thumbCache = {};
             localStorage.removeItem('thumbCache');
-            toast('Klasör yeniden tarandı!', 'success');
-            loadModels();
-            loadStats();
-            loadTags();
+
+            await Promise.all([
+                loadModels(),
+                loadStats(),
+                loadTags(),
+            ]);
+
+            toast(`Klasör yeniden tarandı. ${result.total} model bulundu.`, 'success');
         } catch (e) {
             toast('Tarama sırasında hata oluştu', 'error');
         } finally {
             dom.btnRescan.classList.remove('spinning');
+            dom.btnRescan.disabled = false;
+            dom.btnRescan.removeAttribute('aria-busy');
+            if (dom.btnRescanLabel) {
+                dom.btnRescanLabel.textContent = 'Yenile';
+            }
         }
     });
 
@@ -859,37 +1000,18 @@ function openPreview(modelId) {
     dom.noteInput.value = model.note || '';
 
     renderModalTags();
-
-    renderFileList(model.files || []);
-
     renderSuggestedTags();
     loadTagSuggestions();
 
-    // 3D viewer başlat
     const filePath = model.main_file || model.path;
-    if (model.format === 'stl') {
-        setViewerControlsVisible(true);
-        initViewer();
-        loadSTL(`/api/file/${encodeURIComponent(filePath)}`);
-    } else {
-        setViewerControlsVisible(false);
-        dom.viewerLoading.classList.add('visible');
-        dom.viewerLoading.innerHTML = `
-            <div style="text-align: center;">
-                <div style="font-size: 4rem; margin-bottom: 16px;">${getFormatIcon(model.format)}</div>
-                <p style="color: var(--text-secondary); font-size: 0.9rem;">
-                    ${model.format.toUpperCase()} formatı katalogda ve filtrelerde desteklenir.<br>
-                    Etkileşimli 3D önizleme şu an yalnızca STL için mevcut.
-                </p>
-            </div>
-        `;
-    }
+    showSelectedFile(filePath);
 }
 
 function closePreview() {
     dom.previewModal.classList.remove('visible');
     document.body.style.overflow = '';
     state.selectedModel = null;
+    state.selectedFilePath = '';
     setViewerControlsVisible(true);
     disposeViewer();
     renderGrid();
@@ -1026,20 +1148,160 @@ function initViewer() {
     animate();
 }
 
-function loadSTL(url) {
+function showViewerLoading(message = '3D model yükleniyor...') {
     dom.viewerLoading.classList.add('visible');
-    dom.viewerLoading.innerHTML = '<div class="spinner"></div><p>3D model yükleniyor...</p>';
+    dom.viewerLoading.innerHTML = `<div class="spinner"></div><p>${message}</p>`;
+}
+
+function disposeMaterial(material) {
+    const materials = Array.isArray(material) ? material : [material];
+    materials.filter(Boolean).forEach((entry) => {
+        Object.values(entry).forEach((value) => {
+            if (value && value.isTexture) {
+                value.dispose();
+            }
+        });
+        entry.dispose?.();
+    });
+}
+
+function disposeObject3D(object) {
+    if (!object) return;
+    object.traverse((child) => {
+        child.geometry?.dispose?.();
+        if (child.material) {
+            disposeMaterial(child.material);
+        }
+    });
+}
+
+function clearCurrentObject() {
+    if (!state.currentObject) return;
+    state.scene?.remove(state.currentObject);
+    disposeObject3D(state.currentObject);
+    state.currentObject = null;
+}
+
+function prepareViewerObject(object) {
+    object.traverse((child) => {
+        if (!child.isMesh) return;
+        child.castShadow = true;
+        child.receiveShadow = true;
+        if (child.geometry && !child.geometry.attributes.normal && child.geometry.computeVertexNormals) {
+            child.geometry.computeVertexNormals();
+        }
+    });
+}
+
+function fitViewerObject(object) {
+    const wrapper = new THREE.Group();
+    wrapper.add(object);
+
+    const bounds = new THREE.Box3().setFromObject(object);
+    if (bounds.isEmpty()) {
+        return wrapper;
+    }
+
+    const center = bounds.getCenter(new THREE.Vector3());
+    object.position.sub(center);
+
+    const size = bounds.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    const scale = 80 / maxDim;
+    wrapper.scale.setScalar(scale);
+
+    const groundedBounds = new THREE.Box3().setFromObject(wrapper);
+    wrapper.position.y = -groundedBounds.min.y;
+
+    return wrapper;
+}
+
+function focusViewerObject(object) {
+    const bounds = new THREE.Box3().setFromObject(object);
+    if (bounds.isEmpty()) return;
+
+    const size = bounds.getSize(new THREE.Vector3());
+    const center = bounds.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 80);
+    const distance = maxDim * 1.6;
+
+    state.camera.position.set(
+        center.x + distance * 0.6,
+        center.y + distance * 0.5,
+        center.z + distance * 0.8,
+    );
+    state.controls.target.copy(center);
+    state.controls.update();
+}
+
+function setViewerObject(object) {
+    clearCurrentObject();
+    prepareViewerObject(object);
+
+    const framedObject = fitViewerObject(object);
+    state.currentObject = framedObject;
+    state.scene.add(framedObject);
+    focusViewerObject(framedObject);
+
+    dom.viewerLoading.classList.remove('visible');
+}
+
+function renderViewerLoadError(message = 'Model yüklenemedi') {
+    dom.viewerLoading.classList.add('visible');
+    dom.viewerLoading.innerHTML = `
+        <div style="text-align: center; color: var(--text-secondary);">
+            <div style="font-size: 3rem; margin-bottom: 12px;">⚠️</div>
+            <p>${message}</p>
+        </div>
+    `;
+}
+
+function renderViewerImagePreview(imageUrl, message, fallbackMessage) {
+    disposeViewer();
+    setViewerControlsVisible(false);
+    showViewerLoading(message);
+
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:12px;max-width:100%;padding:12px;';
+
+    const image = document.createElement('img');
+    image.alt = message;
+    image.style.cssText = 'max-width:min(100%, 560px);max-height:320px;object-fit:contain;border-radius:16px;box-shadow:0 18px 50px rgba(15,23,42,0.18);background:rgba(255,255,255,0.92);';
+
+    const caption = document.createElement('p');
+    caption.textContent = message;
+    caption.style.cssText = 'margin:0;color:var(--text-secondary);font-size:0.9rem;text-align:center;';
+
+    wrapper.append(image, caption);
+
+    image.addEventListener('load', () => {
+        dom.viewerLoading.replaceChildren(wrapper);
+        dom.viewerLoading.classList.add('visible');
+    });
+    image.addEventListener('error', () => {
+        renderViewerLoadError(fallbackMessage);
+    });
+
+    image.src = imageUrl;
+}
+
+function show3MFPreviewFallback(filePath) {
+    if (!filePath || state.selectedFilePath !== filePath) return;
+    renderViewerImagePreview(
+        buildPreviewUrl(filePath),
+        '3D mesh açılamadı. Paketteki gömülü 3MF önizlemesi gösteriliyor.',
+        '3MF modeli açılamadı ve pakette önizleme görseli bulunamadı.',
+    );
+}
+
+function loadSTL(url, filePath) {
+    showViewerLoading('STL model yükleniyor...');
 
     const loader = new THREE.STLLoader();
     loader.load(
         url,
         (geometry) => {
-            if (state.currentMesh) {
-                state.scene.remove(state.currentMesh);
-                state.currentMesh.geometry.dispose();
-                state.currentMesh.material.dispose();
-            }
-
+            if (state.selectedFilePath !== filePath) return;
             const material = new THREE.MeshPhysicalMaterial({
                 color: 0x7c80ff,
                 metalness: 0.1,
@@ -1049,55 +1311,44 @@ function loadSTL(url) {
             });
 
             const mesh = new THREE.Mesh(geometry, material);
-            mesh.castShadow = true;
-            mesh.receiveShadow = true;
-
-            geometry.computeBoundingBox();
-            const box = geometry.boundingBox;
-            const center = new THREE.Vector3();
-            box.getCenter(center);
-            geometry.translate(-center.x, -center.y, -center.z);
-
-            const size = new THREE.Vector3();
-            box.getSize(size);
-            const maxDim = Math.max(size.x, size.y, size.z);
-            const scale = 80 / maxDim;
-            mesh.scale.set(scale, scale, scale);
-
-            geometry.computeBoundingBox();
-            mesh.position.y = -geometry.boundingBox.min.y * scale;
-
-            state.currentMesh = mesh;
-            state.scene.add(mesh);
-
-            const dist = maxDim * scale * 1.6;
-            state.camera.position.set(dist * 0.6, dist * 0.5, dist * 0.8);
-            state.controls.target.set(0, (size.y * scale) / 4, 0);
-            state.controls.update();
-
-            dom.viewerLoading.classList.remove('visible');
+            setViewerObject(mesh);
         },
         undefined,
         (error) => {
+            if (state.selectedFilePath !== filePath) return;
             console.error('STL yüklenemedi:', error);
-            dom.viewerLoading.innerHTML = `
-                <div style="text-align: center; color: var(--text-secondary);">
-                    <div style="font-size: 3rem; margin-bottom: 12px;">⚠️</div>
-                    <p>Model yüklenemedi</p>
-                </div>
-            `;
+            renderViewerLoadError('STL modeli yüklenemedi');
+        }
+    );
+}
+
+function load3MF(url, filePath) {
+    showViewerLoading('3MF model yükleniyor...');
+
+    const loader = new THREE.ThreeMFLoader();
+    loader.load(
+        url,
+        (object) => {
+            if (state.selectedFilePath !== filePath) return;
+            if (!object) {
+                show3MFPreviewFallback(filePath);
+                return;
+            }
+
+            setViewerObject(object);
+        },
+        undefined,
+        (error) => {
+            if (state.selectedFilePath !== filePath) return;
+            console.error('3MF yüklenemedi:', error);
+            show3MFPreviewFallback(filePath);
         }
     );
 }
 
 function disposeViewer() {
     if (state.animationId) cancelAnimationFrame(state.animationId);
-    if (state.currentMesh) {
-        state.scene?.remove(state.currentMesh);
-        state.currentMesh.geometry?.dispose();
-        state.currentMesh.material?.dispose();
-        state.currentMesh = null;
-    }
+    clearCurrentObject();
     if (state.renderer) {
         state.renderer.dispose();
         state.renderer = null;

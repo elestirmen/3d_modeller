@@ -1,13 +1,19 @@
+import base64
 import io
 import json
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
 import app
+
+PNG_1X1 = base64.b64decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yF9kAAAAASUVORK5CYII='
+)
 
 
 def make_model(model_id, tags=None):
@@ -30,6 +36,26 @@ def make_model(model_id, tags=None):
     }
 
 
+def make_snapshot(paths):
+    root_files = []
+    for path in paths:
+        path_obj = Path(path)
+        root_files.append({
+            'path_obj': path_obj,
+            'root_path': Path('3d models'),
+            'name': path_obj.stem,
+            'format': path_obj.suffix.lstrip('.').lower(),
+            'rel_path': str(path_obj).replace('\\', '/'),
+            'size': 1,
+            'modified': 0,
+        })
+
+    return {
+        'root_files': root_files,
+        'groups': {'project': {}, 'folder': {}},
+    }
+
+
 class AppBehaviorTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -46,8 +72,8 @@ class AppBehaviorTests(unittest.TestCase):
         return json.loads(app.DB_PATH.read_text(encoding='utf-8'))
 
     def test_invalid_model_mutation_returns_404_and_does_not_persist(self):
-        scanned = make_model('real-model')
-        with patch('app.scan_models', return_value=scanned):
+        snapshot = make_snapshot(['real-model.stl'])
+        with patch('app.scan_model_snapshot', return_value=snapshot):
             response = self.client.post('/api/models/fake-model/favorite')
 
         self.assertEqual(response.status_code, 404)
@@ -55,36 +81,41 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertNotIn('fake-model', self.read_db()['models'])
 
     def test_rescan_prunes_stale_records(self):
+        project_id = app.build_model_id('real-model.stl', group_mode='project')
         app.save_db({
             'models': {
-                'real-model': {'tags': ['live'], 'favorite': False, 'note': '', 'printed': False},
+                project_id: {'tags': ['live'], 'favorite': False, 'note': '', 'printed': False},
                 'stale-model': {'tags': ['old'], 'favorite': True, 'note': '', 'printed': False},
             },
             'catalog': {},
             'last_scan': None,
         })
 
-        with patch('app.scan_models', return_value=make_model('real-model', tags=['suggested'])):
-            response = self.client.post('/api/scan')
+        snapshot = make_snapshot(['real-model.stl'])
+        with patch('app.scan_model_snapshot', return_value=snapshot):
+            response = self.client.post('/api/scan?group=project')
 
         self.assertEqual(response.status_code, 200)
         db = self.read_db()
-        self.assertEqual(set(db['models']), {'real-model'})
-        self.assertEqual(db['models']['real-model']['tags'], ['live'])
+        folder_id = app.build_model_id('real-model.stl', group_mode='folder')
+        self.assertEqual(set(db['models']), {project_id, folder_id})
+        self.assertEqual(db['models'][project_id]['tags'], ['live'])
 
     def test_stats_and_tags_ignore_stale_entries(self):
+        project_id = app.build_model_id('real-model.stl', group_mode='project')
         app.save_db({
             'models': {
-                'real-model': {'tags': ['live'], 'favorite': True, 'note': '', 'printed': True},
+                project_id: {'tags': ['live'], 'favorite': True, 'note': '', 'printed': True},
                 'stale-model': {'tags': ['old'], 'favorite': True, 'note': '', 'printed': True},
             },
             'catalog': {},
             'last_scan': None,
         })
 
-        with patch('app.scan_models', return_value=make_model('real-model')):
-            stats_response = self.client.get('/api/stats')
-            tags_response = self.client.get('/api/tags')
+        snapshot = make_snapshot(['real-model.stl'])
+        with patch('app.scan_model_snapshot', return_value=snapshot):
+            stats_response = self.client.get('/api/stats?group=project')
+            tags_response = self.client.get('/api/tags?group=project')
 
         self.assertEqual(stats_response.status_code, 200)
         self.assertEqual(stats_response.get_json()['favorites'], 1)
@@ -95,16 +126,17 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(tags_response.get_json()['tags'], [{'name': 'live', 'count': 1}])
 
     def test_models_endpoint_uses_cached_catalog_after_initial_scan(self):
-        scanned = make_model('real-model')
-        with patch('app.scan_models', return_value=scanned) as scan_mock:
+        snapshot = make_snapshot(['real-model.stl'])
+        with patch('app.scan_model_snapshot', return_value=snapshot) as scan_mock:
             first_response = self.client.get('/api/models?group=project')
             second_response = self.client.get('/api/models?group=project')
 
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
-        self.assertEqual(scan_mock.call_count, 2)
-        self.assertNotIn('abs_path', self.read_db()['catalog']['real-model'])
-        self.assertEqual(self.read_db()['catalog']['real-model']['path'], 'real-model.stl')
+        self.assertEqual(scan_mock.call_count, 1)
+        project_id = app.build_model_id('real-model.stl', group_mode='project')
+        self.assertNotIn('abs_path', self.read_db()['catalog'][project_id])
+        self.assertEqual(self.read_db()['catalog'][project_id]['path'], 'real-model.stl')
 
     def test_old_schema_db_without_catalog_triggers_refresh(self):
         app.DB_PATH.write_text(json.dumps({
@@ -112,18 +144,20 @@ class AppBehaviorTests(unittest.TestCase):
             'last_scan': 123.0,
         }), encoding='utf-8')
 
-        with patch('app.scan_models', return_value=make_model('real-model')) as scan_mock:
+        snapshot = make_snapshot(['real-model.stl'])
+        with patch('app.scan_model_snapshot', return_value=snapshot) as scan_mock:
             response = self.client.get('/api/models?group=project')
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['total'], 1)
-        self.assertEqual(scan_mock.call_count, 2)
-        self.assertEqual(set(self.read_db()['catalog']), {'real-model'})
+        self.assertEqual(scan_mock.call_count, 1)
+        self.assertEqual(set(self.read_db()['catalog']), {app.build_model_id('real-model.stl', group_mode='project')})
 
     def test_invalid_db_file_recovers_and_backs_up_corrupt_data(self):
         app.DB_PATH.write_text('{invalid', encoding='utf-8')
 
-        with patch('app.scan_models', return_value=make_model('real-model')):
+        snapshot = make_snapshot(['real-model.stl'])
+        with patch('app.scan_model_snapshot', return_value=snapshot):
             response = self.client.get('/api/models')
 
         self.assertEqual(response.status_code, 200)
@@ -150,28 +184,102 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(model['format'], 'stl')
         self.assertEqual(model['main_file'], 'mixed-project/small.stl')
 
-    def test_scanned_catalog_strips_abs_paths_and_normalizes_separators(self):
-        scanned = {
-            'real-model': {
-                'id': 'real-model',
-                'name': 'real-model',
-                'display_name': 'real-model',
-                'type': 'project',
-                'format': 'stl',
-                'path': 'folder\\real-model',
-                'main_file': 'folder\\real-model\\part.stl',
-                'abs_path': 'C:\\secret\\folder\\real-model\\part.stl',
-                'size': 1,
-                'size_display': '1 B',
-                'modified': 0,
-                'files': ['folder\\real-model\\part.stl'],
-                'file_count': 1,
-                'suggested_tags': ['tag'],
-            }
-        }
+    def test_file_endpoint_supports_download_mode(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        models_root.mkdir(parents=True)
+        (models_root / 'part.stl').write_bytes(b'abc')
 
-        with patch('app.scan_models', return_value=scanned):
-            response = self.client.get('/api/models')
+        original_models_dir = app.MODELS_DIR
+        app.MODELS_DIR = models_root
+        try:
+            response = self.client.get('/api/file/part.stl?download=1')
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('attachment', response.headers.get('Content-Disposition', ''))
+        response.close()
+
+    def test_preview_endpoint_returns_embedded_3mf_thumbnail(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        models_root.mkdir(parents=True)
+
+        model_path = models_root / 'previewable.3mf'
+        with zipfile.ZipFile(model_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                '[Content_Types].xml',
+                '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+            )
+            archive.writestr(
+                '3D/3dmodel.model',
+                '<?xml version="1.0" encoding="UTF-8"?><model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"></model>',
+            )
+            archive.writestr('Auxiliaries/.thumbnails/thumbnail_3mf.png', PNG_1X1)
+
+        original_models_dir = app.MODELS_DIR
+        app.MODELS_DIR = models_root
+        try:
+            response = self.client.get('/api/preview/previewable.3mf')
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get('Content-Type'), 'image/png')
+        self.assertEqual(response.data, PNG_1X1)
+        response.close()
+
+    def test_preview_endpoint_returns_404_without_embedded_image(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        models_root.mkdir(parents=True)
+
+        model_path = models_root / 'no-preview.3mf'
+        with zipfile.ZipFile(model_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                '[Content_Types].xml',
+                '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+            )
+            archive.writestr(
+                '3D/3dmodel.model',
+                '<?xml version="1.0" encoding="UTF-8"?><model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"></model>',
+            )
+
+        original_models_dir = app.MODELS_DIR
+        app.MODELS_DIR = models_root
+        try:
+            response = self.client.get('/api/preview/no-preview.3mf')
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_scanned_catalog_strips_abs_paths_and_normalizes_separators(self):
+        project_id = app.build_model_id('folder/real-model', group_mode='project')
+        app.save_db({
+            'models': {
+                project_id: {'tags': [], 'favorite': False, 'note': '', 'printed': False},
+            },
+            'catalog': {
+                project_id: {
+                    'id': project_id,
+                    'name': 'real-model',
+                    'display_name': 'real-model',
+                    'type': 'project',
+                    'format': 'stl',
+                    'path': 'folder\\real-model',
+                    'main_file': 'folder\\real-model\\part.stl',
+                    'abs_path': 'C:\\secret\\folder\\real-model\\part.stl',
+                    'size': 1,
+                    'size_display': '1 B',
+                    'modified': 0,
+                    'files': ['folder\\real-model\\part.stl'],
+                    'file_count': 1,
+                    'suggested_tags': ['tag'],
+                }
+            },
+            'last_scan': 1.0,
+        })
+
+        response = self.client.get('/api/models?group=project')
 
         self.assertEqual(response.status_code, 200)
         model = response.get_json()['models'][0]
@@ -180,7 +288,7 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(model['files'], ['folder/real-model/part.stl'])
         self.assertNotIn('abs_path', model)
 
-        catalog_model = self.read_db()['catalog']['real-model']
+        catalog_model = self.read_db()['catalog'][project_id]
         self.assertEqual(catalog_model['path'], 'folder/real-model')
         self.assertEqual(catalog_model['main_file'], 'folder/real-model/part.stl')
         self.assertNotIn('abs_path', catalog_model)

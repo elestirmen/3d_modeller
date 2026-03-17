@@ -4,12 +4,15 @@ Dağınık 3D model dosyalarını tarayan, kataloglayan ve yöneten web uygulama
 """
 
 import hashlib
+import io
 import json
+import mimetypes
 import os
 import sys
 import tempfile
 import threading
 import time
+import zipfile
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
@@ -28,6 +31,13 @@ GROUP_MODES = ('project', 'folder')
 
 # Desteklenen dosya formatları
 SUPPORTED_FORMATS = {'.stl', '.3mf', '.obj', '.gltf', '.glb', '.fbx', '.ply'}
+THREEMF_PREVIEW_CANDIDATES = (
+    'Auxiliaries/.thumbnails/thumbnail_3mf.png',
+    'Auxiliaries/.thumbnails/thumbnail_middle.png',
+    'Auxiliaries/.thumbnails/thumbnail_small.png',
+    'Metadata/plate_1.png',
+    'Metadata/top_1.png',
+)
 
 # Otomatik kategori eşleştirme kuralları
 AUTO_TAGS = {
@@ -137,6 +147,62 @@ def normalize_catalog(catalog=None):
             normalized[str(model_id)] = normalized_record
 
     return normalized
+
+
+def resolve_model_file_path(filepath):
+    """API'den gelen göreli model yolunu güvenli şekilde çöz."""
+    full_path = MODELS_DIR / filepath
+    if not full_path.exists() or not full_path.is_file():
+        abort(404)
+
+    try:
+        full_path.resolve().relative_to(MODELS_DIR.resolve())
+    except ValueError:
+        abort(403)
+
+    if full_path.suffix.lower() not in SUPPORTED_FORMATS:
+        abort(404)
+
+    return full_path
+
+
+def find_3mf_preview_entry(zip_file):
+    """3MF paketindeki en uygun gömülü önizleme görselini bul."""
+    names = set(zip_file.namelist())
+    for candidate in THREEMF_PREVIEW_CANDIDATES:
+        if candidate in names:
+            return candidate
+
+    preferred_prefixes = ('Auxiliaries/.thumbnails/', 'Metadata/', 'Auxiliaries/Model Pictures/')
+    preferred_suffixes = ('.png', '.webp', '.jpg', '.jpeg')
+
+    for name in zip_file.namelist():
+        lowered = name.lower()
+        if lowered.endswith(preferred_suffixes) and lowered.startswith(tuple(prefix.lower() for prefix in preferred_prefixes)):
+            return name
+
+    for name in zip_file.namelist():
+        lowered = name.lower()
+        if lowered.endswith(preferred_suffixes):
+            return name
+
+    return None
+
+
+def read_3mf_preview(full_path):
+    """3MF içindeki gömülü önizleme görselini oku."""
+    try:
+        with zipfile.ZipFile(full_path, 'r') as archive:
+            preview_entry = find_3mf_preview_entry(archive)
+            if not preview_entry:
+                return None
+
+            preview_bytes = archive.read(preview_entry)
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return None
+
+    mimetype = mimetypes.guess_type(preview_entry)[0] or 'application/octet-stream'
+    return preview_entry, preview_bytes, mimetype
 
 
 def normalize_db(db=None):
@@ -271,60 +337,84 @@ def suggest_tags(name):
     return suggested
 
 
-def choose_project_main_file(files):
-    """Projede önizleme için en uygun ana dosyayı seç."""
-    preferred_files = [f for f in files if f.suffix.lower() == '.stl']
-    candidates = preferred_files or list(files)
-    return max(candidates, key=lambda f: (f.stat().st_size, str(f).lower()))
+def choose_group_main_file(file_entries):
+    """Önizleme için en uygun ana dosyayı seç."""
+    preferred_files = [entry for entry in file_entries if entry['format'] == 'stl']
+    candidates = preferred_files or list(file_entries)
+    return max(candidates, key=lambda entry: (entry['size'], entry['rel_path'].lower()))
 
 
-def scan_models(group_mode='project'):
-    """3D model klasörünü tara ve istenen görünüm için katalog üret."""
-    group_mode = parse_group_mode(group_mode)
-    models = {}
+def scan_model_snapshot():
+    """Dosya sistemini tek geçişte okuyup tarama özeti üret."""
+    snapshot = {
+        'root_files': [],
+        'groups': {group_mode: {} for group_mode in GROUP_MODES},
+    }
 
     if not MODELS_DIR.exists():
-        return models
+        return snapshot
 
-    # Görünüm moduna göre klasörleri grupla
-    grouped_items = {}  # klasör yolu -> dosya listesi
-    root_files = []  # kök dizindeki tekil dosyalar
-
-    for root, _dirs, files in os.walk(MODELS_DIR):
+    for root, dirs, files in os.walk(MODELS_DIR):
+        dirs.sort()
+        files.sort()
         root_path = Path(root)
 
-        for f in files:
-            file_path = root_path / f
+        for filename in files:
+            file_path = root_path / filename
             ext = file_path.suffix.lower()
 
             if ext not in SUPPORTED_FORMATS:
                 continue
 
-            if root_path == MODELS_DIR:
-                root_files.append(file_path)
-            else:
-                if group_mode == 'folder':
-                    group_dir = root_path
-                else:
-                    rel_root = root_path.relative_to(MODELS_DIR)
-                    group_dir = MODELS_DIR / rel_root.parts[0]
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
 
+            entry = {
+                'path_obj': file_path,
+                'root_path': root_path,
+                'name': file_path.stem,
+                'format': ext.lstrip('.'),
+                'rel_path': relative_model_path(file_path),
+                'size': stat.st_size,
+                'modified': stat.st_mtime,
+            }
+
+            if root_path == MODELS_DIR:
+                snapshot['root_files'].append(entry)
+                continue
+
+            rel_root = root_path.relative_to(MODELS_DIR)
+            project_dir = MODELS_DIR / rel_root.parts[0]
+            grouped_dirs = {
+                'project': project_dir,
+                'folder': root_path,
+            }
+
+            for group_mode, group_dir in grouped_dirs.items():
                 group_key = relative_model_path(group_dir)
-                if group_key not in grouped_items:
-                    grouped_items[group_key] = {
+                groups = snapshot['groups'][group_mode]
+                if group_key not in groups:
+                    groups[group_key] = {
                         'name': group_dir.name,
                         'path': group_dir,
-                        'files': []
+                        'files': [],
                     }
-                grouped_items[group_key]['files'].append(file_path)
+                groups[group_key]['files'].append(entry)
 
-    # Kök dizindeki tekil dosyaları model olarak ekle
-    for fp in root_files:
-        rel_path = relative_model_path(fp)
+    return snapshot
+
+
+def build_catalog_from_snapshot(snapshot, group_mode='project'):
+    """Snapshot verisinden istenen görünümün katalogunu oluştur."""
+    group_mode = parse_group_mode(group_mode)
+    models = {}
+
+    for entry in snapshot.get('root_files', []):
+        rel_path = entry['rel_path']
         model_id = build_model_id(rel_path, group_mode=group_mode)
-        stat = fp.stat()
-        name = fp.stem
-        # Çift uzantılı dosyaları temizle (örn: "file.stl.stl")
+        name = entry['name']
         if name.endswith('.stl') or name.endswith('.3mf'):
             name = Path(name).stem
 
@@ -333,30 +423,26 @@ def scan_models(group_mode='project'):
             'name': name,
             'display_name': name,
             'type': 'file',
-            'format': fp.suffix.lower().lstrip('.'),
+            'format': entry['format'],
             'path': rel_path,
-            'size': stat.st_size,
-            'size_display': format_size(stat.st_size),
-            'modified': stat.st_mtime,
+            'size': entry['size'],
+            'size_display': format_size(entry['size']),
+            'modified': entry['modified'],
             'files': [rel_path],
             'file_count': 1,
             'suggested_tags': suggest_tags(name),
         })
 
-    # Gruplanmış klasörleri model olarak ekle
-    for grouped in grouped_items.values():
+    for grouped in snapshot.get('groups', {}).get(group_mode, {}).values():
         group_path = relative_model_path(grouped['path'])
         model_id = build_model_id(group_path, group_mode=group_mode)
-        total_size = sum(f.stat().st_size for f in grouped['files'])
-        latest_modified = max(f.stat().st_mtime for f in grouped['files'])
-
-        file_list = [relative_model_path(f) for f in grouped['files']]
-        # STL varsa onu tercih et; yoksa en büyük dosyayı kullan.
-        main_file = choose_project_main_file(grouped['files'])
-        main_format = main_file.suffix.lower().lstrip('.')
-
+        file_entries = grouped['files']
+        total_size = sum(entry['size'] for entry in file_entries)
+        latest_modified = max(entry['modified'] for entry in file_entries)
+        file_list = [entry['rel_path'] for entry in file_entries]
+        main_file = choose_group_main_file(file_entries)
         name = grouped['name']
-        # Thingiverse tarzı numaraları temizle
+
         clean_name = name
         for sep in [' - ', ' -']:
             parts = clean_name.rsplit(sep, 1)
@@ -368,9 +454,9 @@ def scan_models(group_mode='project'):
             'name': name,
             'display_name': clean_name,
             'type': 'folder' if group_mode == 'folder' else 'project',
-            'format': main_format,
+            'format': main_file['format'],
             'path': group_path,
-            'main_file': relative_model_path(main_file),
+            'main_file': main_file['rel_path'],
             'size': total_size,
             'size_display': format_size(total_size),
             'modified': latest_modified,
@@ -380,6 +466,12 @@ def scan_models(group_mode='project'):
         })
 
     return models
+
+
+def scan_models(group_mode='project'):
+    """3D model klasörünü tara ve istenen görünüm için katalog üret."""
+    snapshot = scan_model_snapshot()
+    return build_catalog_from_snapshot(snapshot, group_mode=group_mode)
 
 
 def _load_db_unlocked():
@@ -467,8 +559,9 @@ def set_catalog_for_mode(db, scanned, group_mode='project'):
 
 def refresh_all_catalogs_unlocked(db):
     """Tüm görünüm modları için katalogları yeniden üret."""
+    snapshot = scan_model_snapshot()
     for group_mode in GROUP_MODES:
-        scanned = normalize_catalog(scan_models(group_mode=group_mode))
+        scanned = normalize_catalog(build_catalog_from_snapshot(snapshot, group_mode=group_mode))
         set_catalog_for_mode(db, scanned, group_mode=group_mode)
         sync_db_with_scan(db, scanned, group_mode=group_mode)
     db['last_scan'] = time.time()
@@ -776,17 +869,33 @@ def api_stats():
 @app.route('/api/file/<path:filepath>')
 def api_serve_file(filepath):
     """3D model dosyasını serve et."""
-    full_path = MODELS_DIR / filepath
-    if not full_path.exists() or not full_path.is_file():
+    full_path = resolve_model_file_path(filepath)
+    as_attachment = request.args.get('download', '').strip() == '1'
+    return send_file(
+        str(full_path),
+        as_attachment=as_attachment,
+        download_name=full_path.name if as_attachment else None,
+    )
+
+
+@app.route('/api/preview/<path:filepath>')
+def api_preview_file(filepath):
+    """Destekleniyorsa model dosyası için gömülü önizleme döndür."""
+    full_path = resolve_model_file_path(filepath)
+    if full_path.suffix.lower() != '.3mf':
         abort(404)
-    # Güvenlik kontrolü
-    try:
-        full_path.resolve().relative_to(MODELS_DIR.resolve())
-    except ValueError:
-        abort(403)
-    if full_path.suffix.lower() not in SUPPORTED_FORMATS:
+
+    preview = read_3mf_preview(full_path)
+    if not preview:
         abort(404)
-    return send_file(str(full_path))
+
+    preview_name, preview_bytes, mimetype = preview
+    return send_file(
+        io.BytesIO(preview_bytes),
+        mimetype=mimetype,
+        download_name=Path(preview_name).name,
+        conditional=False,
+    )
 
 
 # ─── Main ────────────────────────────────────────────────────────────
