@@ -1,77 +1,77 @@
-# 🧊 3D Model Yöneticisi
+# 3D Model Yöneticisi
 
-Dağınık 3D model dosyalarını tarayan, kataloglayan ve yöneten web uygulaması. STL, 3MF, OBJ, GLTF, GLB, FBX ve PLY formatlarını kataloglar, filtreler ve listeler. Etkileşimli 3D önizleme şu an STL dosyaları için sunulur.
+Yerel `3d models/` klasörünü tarayan, modelleri kataloglayan ve web arayüzü üzerinden filtreleme, etiketleme, favorileme ve STL önizleme sağlayan küçük bir Flask uygulaması.
 
 ## Özellikler
 
-- **Tarama kataloğu** — `3d models` klasöründeki tüm modelleri ilk açılışta kataloglar, `Yeniden Tara` ile günceller
-- **Akıllı etiketleme** — Dosya/klasör adından otomatik kategori önerisi
-- **Arama ve filtreleme** — İsim, etiket veya format ile arama
-- **Favoriler** — Sık kullandığınız modelleri işaretleyin
-- **Notlar** — Her model için özel not ekleyin
-- **Yazdırıldı takibi** — Hangi modellerin baskısını aldığınızı kaydedin
+- `3d models/` klasörünü tarayıp proje veya tekil dosya olarak kataloglar.
+- Dosya ve klasör isimlerinden otomatik etiket önerileri üretir.
+- İsim, etiket, format ve favori durumuna göre filtreleme yapar.
+- Model bazlı not, favori ve yazdırıldı durumu saklar.
+- STL dosyaları için Three.js tabanlı önizleme ve thumbnail üretir.
 
-## Kurulum
+## Çalıştırma
 
 ```bash
-# Bağımlılıkları yükle
 pip install -r requirements.txt
-
-# Uygulamayı başlat
 python app.py
 ```
 
-Tarayıcıda **http://localhost:5000** adresine gidin.
+Varsayılan adres `http://localhost:5000` olur.
 
-İlk açılışta klasör taranır. Dosya sisteminde sonradan yaptığınız değişiklikleri arayüze yansıtmak için **Yeniden Tara** düğmesini kullanın.
+İlk açılışta katalog taranır. Dosya sisteminde değişiklik yaptıktan sonra arayüzdeki `Yeniden Tara` düğmesini kullanın.
 
-## Klasör yapısı
+## Çevre Değişkenleri
 
+- `MODEL_MANAGER_HOST`: Flask host değeri. Varsayılan `127.0.0.1`
+- `MODEL_MANAGER_PORT`: Flask port değeri. Varsayılan `5000`
+- `MODEL_MANAGER_DEBUG`: `1`, `true`, `yes` veya `on` verilirse debug açılır
+
+Örnek:
+
+```bash
+MODEL_MANAGER_DEBUG=1 python app.py
 ```
+
+## Proje Yapısı
+
+```text
 3d_modeller/
-├── app.py              # Flask backend
-├── db.json             # Kullanıcı verileri (etiketler, favoriler, notlar)
+├── app.py
 ├── requirements.txt
-├── 3d models/          # 3D model dosyalarınızı buraya koyun
-│   ├── proje-1/
-│   │   ├── model.stl
-│   │   └── ...
-│   └── model.stl
+├── db.json
+├── 3d models/
 ├── static/
-└── templates/
+│   ├── css/style.css
+│   └── js/app.js
+├── templates/index.html
+└── tests/test_app.py
 ```
-
-## Desteklenen formatlar
-
-| Format | Uzantı |
-|--------|--------|
-| STL | `.stl` |
-| 3MF | `.3mf` |
-| OBJ | `.obj` |
-| glTF | `.gltf`, `.glb` |
-| FBX | `.fbx` |
-| PLY | `.ply` |
 
 ## API
 
-| Endpoint | Açıklama |
-|---------|----------|
-| `GET /api/models` | Model listesi (q, tag, format, sort, fav parametreleri) |
-| `POST /api/models/<id>/tags` | Etiket güncelle |
-| `POST /api/models/<id>/favorite` | Favori toggle |
-| `POST /api/models/<id>/note` | Not güncelle |
-| `POST /api/models/<id>/printed` | Yazdırıldı toggle |
-| `GET /api/tags` | Tüm etiketler |
-| `POST /api/scan` | Yeniden tara |
-| `GET /api/stats` | İstatistikler |
+- `GET /api/models`: Model listesi. `q`, `tag`, `format`, `sort`, `fav` parametrelerini destekler.
+- `POST /api/models/<id>/tags`: Etiketleri günceller.
+- `POST /api/models/<id>/favorite`: Favori durumunu değiştirir.
+- `POST /api/models/<id>/note`: Notu günceller.
+- `POST /api/models/<id>/printed`: Yazdırıldı durumunu değiştirir.
+- `GET /api/tags`: Kullanılan etiketleri ve sayılarını döner.
+- `POST /api/scan`: Klasörü yeniden tarar.
+- `GET /api/stats`: Özet istatistikleri döner.
+- `GET /api/file/<path>`: Desteklenen model dosyalarını servis eder.
 
-## Test
+## Geliştirme
+
+Test:
 
 ```bash
 python -m unittest -v
 ```
 
-## Gereksinimler
+Lint:
 
-- Python 3.8+
-- Flask 3.0+
+```bash
+ruff check .
+```
+
+Repo artık `.editorconfig` ve `pyproject.toml` ile temel editör ve lint kurallarını içerir.

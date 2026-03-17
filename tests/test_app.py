@@ -103,7 +103,8 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
         self.assertEqual(scan_mock.call_count, 1)
-        self.assertEqual(self.read_db()['catalog'], scanned)
+        self.assertNotIn('abs_path', self.read_db()['catalog']['real-model'])
+        self.assertEqual(self.read_db()['catalog']['real-model']['path'], 'real-model.stl')
 
     def test_old_schema_db_without_catalog_triggers_refresh(self):
         app.DB_PATH.write_text(json.dumps({
@@ -147,7 +148,42 @@ class AppBehaviorTests(unittest.TestCase):
 
         model = next(iter(scanned.values()))
         self.assertEqual(model['format'], 'stl')
-        self.assertEqual(model['main_file'], 'mixed-project\\small.stl')
+        self.assertEqual(model['main_file'], 'mixed-project/small.stl')
+
+    def test_scanned_catalog_strips_abs_paths_and_normalizes_separators(self):
+        scanned = {
+            'real-model': {
+                'id': 'real-model',
+                'name': 'real-model',
+                'display_name': 'real-model',
+                'type': 'project',
+                'format': 'stl',
+                'path': 'folder\\real-model',
+                'main_file': 'folder\\real-model\\part.stl',
+                'abs_path': 'C:\\secret\\folder\\real-model\\part.stl',
+                'size': 1,
+                'size_display': '1 B',
+                'modified': 0,
+                'files': ['folder\\real-model\\part.stl'],
+                'file_count': 1,
+                'suggested_tags': ['tag'],
+            }
+        }
+
+        with patch('app.scan_models', return_value=scanned):
+            response = self.client.get('/api/models')
+
+        self.assertEqual(response.status_code, 200)
+        model = response.get_json()['models'][0]
+        self.assertEqual(model['path'], 'folder/real-model')
+        self.assertEqual(model['main_file'], 'folder/real-model/part.stl')
+        self.assertEqual(model['files'], ['folder/real-model/part.stl'])
+        self.assertNotIn('abs_path', model)
+
+        catalog_model = self.read_db()['catalog']['real-model']
+        self.assertEqual(catalog_model['path'], 'folder/real-model')
+        self.assertEqual(catalog_model['main_file'], 'folder/real-model/part.stl')
+        self.assertNotIn('abs_path', catalog_model)
 
     def test_invalid_json_body_returns_400_without_clearing_tags(self):
         scanned = make_model('real-model')
@@ -246,6 +282,18 @@ class AppBehaviorTests(unittest.TestCase):
         banner = buffer.getvalue().decode('cp1254')
         self.assertIn('3D Model Manager starting...', banner)
         self.assertIn('Open http://localhost:5000', banner)
+
+    def test_get_run_settings_uses_env_overrides_with_safe_defaults(self):
+        with patch.dict('os.environ', {
+            'MODEL_MANAGER_HOST': '0.0.0.0',
+            'MODEL_MANAGER_PORT': 'not-a-port',
+            'MODEL_MANAGER_DEBUG': '1',
+        }, clear=False):
+            settings = app.get_run_settings()
+
+        self.assertEqual(settings['host'], '0.0.0.0')
+        self.assertEqual(settings['port'], 5000)
+        self.assertTrue(settings['debug'])
 
 
 if __name__ == '__main__':

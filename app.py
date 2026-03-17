@@ -3,15 +3,16 @@
 Dağınık 3D model dosyalarını tarayan, kataloglayan ve yöneten web uygulaması.
 """
 
+import hashlib
+import json
 import os
 import sys
-import json
-import hashlib
 import tempfile
 import threading
 import time
 from pathlib import Path
-from flask import Flask, render_template, jsonify, request, send_file, abort
+
+from flask import Flask, abort, jsonify, render_template, request, send_file
 from werkzeug.exceptions import BadRequest, HTTPException
 
 app = Flask(__name__)
@@ -21,6 +22,8 @@ BASE_DIR = Path(__file__).parent
 MODELS_DIR = BASE_DIR / "3d models"
 DB_PATH = BASE_DIR / "db.json"
 DB_LOCK = threading.RLock()
+DEFAULT_HOST = '127.0.0.1'
+DEFAULT_PORT = 5000
 
 # Desteklenen dosya formatları
 SUPPORTED_FORMATS = {'.stl', '.3mf', '.obj', '.gltf', '.glb', '.fbx', '.ply'}
@@ -55,6 +58,86 @@ def default_db():
     return {'models': {}, 'catalog': {}, 'last_scan': None}
 
 
+def coerce_int(value, default=0):
+    """Sayı alanlarını güvenli şekilde tam sayıya çevir."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def coerce_float(value, default=0.0):
+    """Sayı alanlarını güvenli şekilde ondalık sayıya çevir."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_catalog_path(path_value):
+    """Katalogda tutulan göreli yolları platform bağımsız hale getir."""
+    if not isinstance(path_value, str):
+        return ''
+    return path_value.replace('\\', '/').strip().lstrip('/')
+
+
+def relative_model_path(path_obj):
+    """Model yolunu katalog için göreli POSIX biçimine çevir."""
+    return normalize_catalog_path(path_obj.relative_to(MODELS_DIR).as_posix())
+
+
+def normalize_catalog_record(model_id, record=None):
+    """Tarama katalog kaydını API için güvenli ve tutarlı hale getir."""
+    if not isinstance(record, dict):
+        return None
+
+    path = normalize_catalog_path(record.get('path'))
+    files = []
+    for item in record.get('files', []):
+        normalized_item = normalize_catalog_path(item)
+        if normalized_item:
+            files.append(normalized_item)
+
+    if not files and path:
+        files = [path]
+
+    size = coerce_int(record.get('size'), default=0)
+    normalized = {
+        'id': str(model_id),
+        'name': str(record.get('name') or model_id),
+        'display_name': str(record.get('display_name') or record.get('name') or model_id),
+        'type': 'project' if record.get('type') == 'project' else 'file',
+        'format': str(record.get('format', '')).lower(),
+        'path': path,
+        'size': size,
+        'size_display': str(record.get('size_display') or format_size(size)),
+        'modified': coerce_float(record.get('modified'), default=0.0),
+        'files': files,
+        'file_count': coerce_int(record.get('file_count'), default=len(files) or 1),
+        'suggested_tags': [str(tag).strip() for tag in record.get('suggested_tags', []) if str(tag).strip()],
+    }
+
+    main_file = normalize_catalog_path(record.get('main_file'))
+    if main_file:
+        normalized['main_file'] = main_file
+
+    return normalized
+
+
+def normalize_catalog(catalog=None):
+    """Tüm katalog kayıtlarını normalize et ve iç alanları temizle."""
+    normalized = {}
+    if not isinstance(catalog, dict):
+        return normalized
+
+    for model_id, record in catalog.items():
+        normalized_record = normalize_catalog_record(str(model_id), record)
+        if normalized_record is not None:
+            normalized[str(model_id)] = normalized_record
+
+    return normalized
+
+
 def normalize_db(db=None):
     """Diskten gelen DB yapısını güncel şemaya hizala."""
     normalized = default_db()
@@ -66,11 +149,7 @@ def normalize_db(db=None):
 
     has_catalog = isinstance(db.get('catalog'), dict)
     if has_catalog:
-        normalized['catalog'] = {
-            str(model_id): model_data
-            for model_id, model_data in db['catalog'].items()
-            if isinstance(model_data, dict)
-        }
+        normalized['catalog'] = normalize_catalog(db.get('catalog'))
 
     last_scan = db.get('last_scan')
     if has_catalog and isinstance(last_scan, (int, float)):
@@ -166,7 +245,7 @@ def scan_models():
     projects = {}  # klasör yolu -> dosya listesi
     root_files = []  # kök dizindeki tekil dosyalar
 
-    for root, dirs, files in os.walk(MODELS_DIR):
+    for root, _dirs, files in os.walk(MODELS_DIR):
         root_path = Path(root)
         rel_root = root_path.relative_to(MODELS_DIR)
 
@@ -188,14 +267,14 @@ def scan_models():
                 if project_key not in projects:
                     projects[project_key] = {
                         'name': parts[0],
-                        'path': str(project_dir),
+                        'path': project_dir,
                         'files': []
                     }
                 projects[project_key]['files'].append(file_path)
 
     # Kök dizindeki tekil dosyaları model olarak ekle
     for fp in root_files:
-        rel_path = str(fp.relative_to(MODELS_DIR))
+        rel_path = relative_model_path(fp)
         model_id = generate_id(rel_path)
         stat = fp.stat()
         name = fp.stem
@@ -203,29 +282,29 @@ def scan_models():
         if name.endswith('.stl') or name.endswith('.3mf'):
             name = Path(name).stem
 
-        models[model_id] = {
+        models[model_id] = normalize_catalog_record(model_id, {
             'id': model_id,
             'name': name,
             'display_name': name,
             'type': 'file',
             'format': fp.suffix.lower().lstrip('.'),
             'path': rel_path,
-            'abs_path': str(fp),
             'size': stat.st_size,
             'size_display': format_size(stat.st_size),
             'modified': stat.st_mtime,
             'files': [rel_path],
             'file_count': 1,
             'suggested_tags': suggest_tags(name),
-        }
+        })
 
     # Proje klasörlerini model olarak ekle
-    for pk, proj in projects.items():
-        model_id = generate_id(proj['name'])
+    for proj in projects.values():
+        project_path = relative_model_path(proj['path'])
+        model_id = generate_id(project_path)
         total_size = sum(f.stat().st_size for f in proj['files'])
         latest_modified = max(f.stat().st_mtime for f in proj['files'])
 
-        file_list = [str(f.relative_to(MODELS_DIR)) for f in proj['files']]
+        file_list = [relative_model_path(f) for f in proj['files']]
         # STL varsa onu tercih et; yoksa en büyük dosyayı kullan.
         main_file = choose_project_main_file(proj['files'])
         main_format = main_file.suffix.lower().lstrip('.')
@@ -238,22 +317,21 @@ def scan_models():
             if len(parts) == 2 and parts[1].strip().isdigit():
                 clean_name = parts[0].strip()
 
-        models[model_id] = {
+        models[model_id] = normalize_catalog_record(model_id, {
             'id': model_id,
             'name': name,
             'display_name': clean_name,
             'type': 'project',
             'format': main_format,
-            'path': str(Path(proj['path']).relative_to(MODELS_DIR)),
-            'abs_path': str(main_file),
-            'main_file': str(main_file.relative_to(MODELS_DIR)),
+            'path': project_path,
+            'main_file': relative_model_path(main_file),
             'size': total_size,
             'size_display': format_size(total_size),
             'modified': latest_modified,
             'files': file_list,
             'file_count': len(file_list),
             'suggested_tags': suggest_tags(name),
-        }
+        })
 
     return models
 
@@ -323,7 +401,7 @@ def _get_synced_state_unlocked(refresh=False):
     """Tarama sonuçları ile kullanıcı verilerini senkron halde döndür."""
     db = _load_db_unlocked()
     should_scan = refresh or db.get('last_scan') is None
-    scanned = scan_models() if should_scan else db.get('catalog', {})
+    scanned = normalize_catalog(scan_models()) if should_scan else normalize_catalog(db.get('catalog', {}))
     changed = sync_db_with_scan(db, scanned)
 
     if should_scan:
@@ -408,16 +486,44 @@ def safe_console_text(value, encoding=None):
 
 def print_startup_banner(stream=None):
     """Başlangıç bilgilerini terminal encoding'ine uygun bas."""
+    run_settings = get_run_settings()
     output = stream or sys.stdout
     encoding = getattr(output, 'encoding', None)
     for line in (
         '',
         '3D Model Manager starting...',
         f'Model directory: {MODELS_DIR}',
-        'Open http://localhost:5000',
+        f'Open {build_local_url(run_settings["host"], run_settings["port"])}',
         '',
     ):
         print(safe_console_text(line, encoding=encoding), file=output)
+
+
+def parse_env_bool(value, default=False):
+    """Çevre değişkenlerinden gelen bool değerlerini yorumla."""
+    if value is None:
+        return default
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def build_local_url(host, port):
+    """Terminal için okunabilir bir yerel URL üret."""
+    display_host = 'localhost' if host in {'0.0.0.0', '::', DEFAULT_HOST} else host
+    return f'http://{display_host}:{port}'
+
+
+def get_run_settings():
+    """Flask çalışma ayarlarını çevre değişkenlerinden oku."""
+    host = os.getenv('MODEL_MANAGER_HOST', DEFAULT_HOST).strip() or DEFAULT_HOST
+    port = coerce_int(os.getenv('MODEL_MANAGER_PORT', DEFAULT_PORT), default=DEFAULT_PORT)
+    if not 1 <= port <= 65535:
+        port = DEFAULT_PORT
+
+    return {
+        'host': host,
+        'port': port,
+        'debug': parse_env_bool(os.getenv('MODEL_MANAGER_DEBUG'), default=False),
+    }
 
 
 @app.errorhandler(HTTPException)
@@ -597,5 +703,6 @@ def api_serve_file(filepath):
 # ─── Main ────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+    run_settings = get_run_settings()
     print_startup_banner()
-    app.run(debug=True, port=5000)
+    app.run(**run_settings)

@@ -19,6 +19,7 @@
 !*.cfg
 !*.gitignore
 !.gitattributes
+!.editorconfig
 !requirements.txt
 
 # Python/artifact ve yerel durum dosyalari
