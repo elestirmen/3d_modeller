@@ -71,6 +71,8 @@ const dom = {
     btnFilters: $('#btnFilters'),
     btnRescan: $('#btnRescan'),
     btnRescanLabel: $('#btnRescanLabel'),
+    btnFullRescan: $('#btnFullRescan'),
+    btnFullRescanLabel: $('#btnFullRescanLabel'),
     viewGrid: $('#viewGrid'),
     viewList: $('#viewList'),
     statTotal: $('#statTotal'),
@@ -219,6 +221,63 @@ function setViewerControlsVisible(visible) {
 function withGroupMode(path) {
     const separator = path.includes('?') ? '&' : '?';
     return `${path}${separator}group=${encodeURIComponent(state.currentGroupMode)}`;
+}
+
+function setScanButtonsBusy(isBusy, activeMode = 'incremental') {
+    const buttons = [
+        [dom.btnRescan, dom.btnRescanLabel, 'Yenile', 'incremental'],
+        [dom.btnFullRescan, dom.btnFullRescanLabel, 'Tam Tara', 'full'],
+    ];
+
+    buttons.forEach(([button, label, idleText, buttonMode]) => {
+        if (!button) return;
+        button.disabled = isBusy;
+        button.classList.toggle('spinning', isBusy && activeMode === buttonMode);
+        if (isBusy) {
+            button.setAttribute('aria-busy', activeMode === buttonMode ? 'true' : 'false');
+        } else {
+            button.removeAttribute('aria-busy');
+        }
+        if (label) {
+            label.textContent = isBusy && activeMode === buttonMode ? 'Taranıyor...' : idleText;
+        }
+    });
+}
+
+async function runScan(scanMode = 'incremental') {
+    const normalizedMode = scanMode === 'full' ? 'full' : 'incremental';
+    const activeButton = normalizedMode === 'full' ? dom.btnFullRescan : dom.btnRescan;
+    if (!activeButton || activeButton.disabled) return;
+
+    setScanButtonsBusy(true, normalizedMode);
+    try {
+        const result = await api(withGroupMode(`/api/scan?mode=${normalizedMode}`), { method: 'POST' });
+
+        state.thumbCache = {};
+        localStorage.removeItem('thumbCache');
+
+        await Promise.all([
+            loadModels(),
+            loadStats(),
+            loadTags(),
+        ]);
+
+        if (result.mode === 'full') {
+            toast(`Tam tarama tamamlandı. ${result.total} model var.`, 'success');
+            return;
+        }
+
+        if (result.updated > 0) {
+            toast(`Yeni/değişen kayıtlar işlendi. ${result.updated} model güncellendi.`, 'success');
+            return;
+        }
+
+        toast('Yeni model bulunmadı.', 'info');
+    } catch (e) {
+        toast('Tarama sırasında hata oluştu', 'error');
+    } finally {
+        setScanButtonsBusy(false);
+    }
 }
 
 function getModelTypeLabel(type) {
@@ -802,40 +861,13 @@ function bindEvents() {
         dom.modelGrid.classList.add('list-view');
     });
 
-// Yeniden tara
-    dom.btnRescan.addEventListener('click', async () => {
-        if (dom.btnRescan.disabled) return;
+    // Yeniden tara
+    dom.btnRescan.addEventListener('click', () => {
+        runScan('incremental');
+    });
 
-        dom.btnRescan.classList.add('spinning');
-        dom.btnRescan.disabled = true;
-        dom.btnRescan.setAttribute('aria-busy', 'true');
-        if (dom.btnRescanLabel) {
-            dom.btnRescanLabel.textContent = 'Taranıyor...';
-        }
-
-        try {
-            const result = await api(withGroupMode('/api/scan'), { method: 'POST' });
-            // Thumbnail cache'i temizle (yeni dosyalar olabilir)
-            state.thumbCache = {};
-            localStorage.removeItem('thumbCache');
-
-            await Promise.all([
-                loadModels(),
-                loadStats(),
-                loadTags(),
-            ]);
-
-            toast(`Klasör yeniden tarandı. ${result.total} model bulundu.`, 'success');
-        } catch (e) {
-            toast('Tarama sırasında hata oluştu', 'error');
-        } finally {
-            dom.btnRescan.classList.remove('spinning');
-            dom.btnRescan.disabled = false;
-            dom.btnRescan.removeAttribute('aria-busy');
-            if (dom.btnRescanLabel) {
-                dom.btnRescanLabel.textContent = 'Yenile';
-            }
-        }
+    dom.btnFullRescan?.addEventListener('click', () => {
+        runScan('full');
     });
 
     // Modal kapat

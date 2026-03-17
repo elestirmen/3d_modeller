@@ -310,6 +310,14 @@ a:hover {
     min-width: 116px;
 }
 
+.btn-rescan-secondary {
+    color: var(--text-muted);
+}
+
+.btn-rescan-secondary:hover {
+    color: var(--text-primary);
+}
+
 /* ─── Main Layout ─────────────────────────────────────── */
 
 .main-layout {

@@ -93,13 +93,58 @@ class AppBehaviorTests(unittest.TestCase):
 
         snapshot = make_snapshot(['real-model.stl'])
         with patch('app.scan_model_snapshot', return_value=snapshot):
-            response = self.client.post('/api/scan?group=project')
+            response = self.client.post('/api/scan?group=project&mode=full')
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['mode'], 'full')
         db = self.read_db()
         folder_id = app.build_model_id('real-model.stl', group_mode='folder')
         self.assertEqual(set(db['models']), {project_id, folder_id})
         self.assertEqual(db['models'][project_id]['tags'], ['live'])
+
+    def test_incremental_scan_adds_new_model_without_pruning_stale_entries(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        models_root.mkdir(parents=True)
+        (models_root / 'existing.stl').write_bytes(b'abc')
+
+        original_models_dir = app.MODELS_DIR
+        app.MODELS_DIR = models_root
+        try:
+            initial_response = self.client.get('/api/models?group=project')
+            self.assertEqual(initial_response.status_code, 200)
+
+            stale_id = app.build_model_id('ghost.stl', group_mode='project')
+            db = self.read_db()
+            db['models'][stale_id] = {'tags': ['ghost'], 'favorite': False, 'note': '', 'printed': False}
+            db['catalog'][stale_id] = {
+                'id': stale_id,
+                'name': 'ghost',
+                'display_name': 'ghost',
+                'type': 'file',
+                'format': 'stl',
+                'path': 'ghost.stl',
+                'size': 1,
+                'size_display': '1 B',
+                'modified': 0,
+                'files': ['ghost.stl'],
+                'file_count': 1,
+                'suggested_tags': [],
+            }
+            app.save_db(db)
+
+            time.sleep(0.02)
+            (models_root / 'new.stl').write_bytes(b'def')
+            scan_response = self.client.post('/api/scan?group=project')
+            models_response = self.client.get('/api/models?group=project')
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        self.assertEqual(scan_response.status_code, 200)
+        self.assertEqual(scan_response.get_json()['mode'], 'incremental')
+        self.assertEqual(scan_response.get_json()['updated'], 1)
+
+        model_paths = {model['path'] for model in models_response.get_json()['models']}
+        self.assertEqual(model_paths, {'existing.stl', 'new.stl', 'ghost.stl'})
 
     def test_stats_and_tags_ignore_stale_entries(self):
         project_id = app.build_model_id('real-model.stl', group_mode='project')

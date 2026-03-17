@@ -28,6 +28,7 @@ DB_LOCK = threading.RLock()
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 5000
 GROUP_MODES = ('project', 'folder')
+SCAN_MODES = ('incremental', 'full')
 
 # Desteklenen dosya formatları
 SUPPORTED_FORMATS = {'.stl', '.3mf', '.obj', '.gltf', '.glb', '.fbx', '.ply'}
@@ -292,6 +293,14 @@ def parse_group_mode(group_mode=None, default='folder'):
     return normalized
 
 
+def parse_scan_mode(scan_mode=None, default='incremental'):
+    """Geçerli tarama modunu doğrula."""
+    normalized = str(scan_mode or default).strip().lower()
+    if normalized not in SCAN_MODES:
+        abort(400, description='Invalid scan mode')
+    return normalized
+
+
 def build_model_id(key, group_mode='project'):
     """Görünüm moduna göre kararlı model ID üret."""
     base_id = generate_id(key)
@@ -342,6 +351,152 @@ def choose_group_main_file(file_entries):
     preferred_files = [entry for entry in file_entries if entry['format'] == 'stl']
     candidates = preferred_files or list(file_entries)
     return max(candidates, key=lambda entry: (entry['size'], entry['rel_path'].lower()))
+
+
+def build_file_entry(file_path, stat_result=None):
+    """Desteklenen bir model dosyası için standart tarama kaydı üret."""
+    ext = file_path.suffix.lower()
+    if ext not in SUPPORTED_FORMATS:
+        return None
+
+    try:
+        stat = stat_result or file_path.stat()
+    except OSError:
+        return None
+
+    return {
+        'path_obj': file_path,
+        'root_path': file_path.parent,
+        'name': file_path.stem,
+        'format': ext.lstrip('.'),
+        'rel_path': relative_model_path(file_path),
+        'size': stat.st_size,
+        'modified': stat.st_mtime,
+    }
+
+
+def build_root_catalog_record(entry, group_mode='project'):
+    """Tekil kök dosyası için katalog kaydı üret."""
+    rel_path = entry['rel_path']
+    model_id = build_model_id(rel_path, group_mode=group_mode)
+    name = entry['name']
+
+    return normalize_catalog_record(model_id, {
+        'id': model_id,
+        'name': name,
+        'display_name': name,
+        'type': 'file',
+        'format': entry['format'],
+        'path': rel_path,
+        'size': entry['size'],
+        'size_display': format_size(entry['size']),
+        'modified': entry['modified'],
+        'files': [rel_path],
+        'file_count': 1,
+        'suggested_tags': suggest_tags(name),
+    })
+
+
+def build_group_catalog_record(group_path, group_name, file_entries, group_mode='project'):
+    """Klasör/proje grubunun katalog kaydını üret."""
+    if not file_entries:
+        return None
+
+    group_path = normalize_catalog_path(group_path)
+    model_id = build_model_id(group_path, group_mode=group_mode)
+    total_size = sum(entry['size'] for entry in file_entries)
+    latest_modified = max(entry['modified'] for entry in file_entries)
+    file_list = [entry['rel_path'] for entry in file_entries]
+    main_file = choose_group_main_file(file_entries)
+
+    clean_name = group_name
+    for sep in [' - ', ' -']:
+        parts = clean_name.rsplit(sep, 1)
+        if len(parts) == 2 and parts[1].strip().isdigit():
+            clean_name = parts[0].strip()
+
+    return normalize_catalog_record(model_id, {
+        'id': model_id,
+        'name': group_name,
+        'display_name': clean_name,
+        'type': 'folder' if group_mode == 'folder' else 'project',
+        'format': main_file['format'],
+        'path': group_path,
+        'main_file': main_file['rel_path'],
+        'size': total_size,
+        'size_display': format_size(total_size),
+        'modified': latest_modified,
+        'files': file_list,
+        'file_count': len(file_list),
+        'suggested_tags': suggest_tags(group_name),
+    })
+
+
+def collect_supported_files(directory, recursive=False):
+    """Dizin içindeki desteklenen model dosyalarını topla."""
+    directory = Path(directory)
+    if not directory.exists():
+        return []
+
+    entries = []
+    if recursive:
+        for root, dirs, files in os.walk(directory):
+            dirs.sort()
+            files.sort()
+            root_path = Path(root)
+            for filename in files:
+                entry = build_file_entry(root_path / filename)
+                if entry is not None:
+                    entries.append(entry)
+        return entries
+
+    for child in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
+        if not child.is_file():
+            continue
+        entry = build_file_entry(child)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def scan_incremental_changes(last_scan):
+    """Son taramadan sonra eklenen/değişen dosyaların etkilediği kayıtları bul."""
+    threshold = max(coerce_float(last_scan, default=0.0) - 1.0, 0.0)
+    changes = {
+        'root_files': {},
+        'groups': {group_mode: set() for group_mode in GROUP_MODES},
+    }
+
+    if not MODELS_DIR.exists():
+        return changes
+
+    for root, dirs, files in os.walk(MODELS_DIR):
+        dirs.sort()
+        files.sort()
+        root_path = Path(root)
+
+        try:
+            directory_mtime = root_path.stat().st_mtime
+        except OSError:
+            directory_mtime = threshold + 1
+
+        if root_path != MODELS_DIR and directory_mtime <= threshold:
+            continue
+
+        for filename in files:
+            entry = build_file_entry(root_path / filename)
+            if entry is None or entry['modified'] <= threshold:
+                continue
+
+            if root_path == MODELS_DIR:
+                changes['root_files'][entry['rel_path']] = entry
+                continue
+
+            rel_root = root_path.relative_to(MODELS_DIR)
+            changes['groups']['project'].add(normalize_catalog_path(rel_root.parts[0]))
+            changes['groups']['folder'].add(relative_model_path(root_path))
+
+    return changes
 
 
 def scan_model_snapshot():
@@ -412,58 +567,18 @@ def build_catalog_from_snapshot(snapshot, group_mode='project'):
     models = {}
 
     for entry in snapshot.get('root_files', []):
-        rel_path = entry['rel_path']
-        model_id = build_model_id(rel_path, group_mode=group_mode)
-        name = entry['name']
-        if name.endswith('.stl') or name.endswith('.3mf'):
-            name = Path(name).stem
-
-        models[model_id] = normalize_catalog_record(model_id, {
-            'id': model_id,
-            'name': name,
-            'display_name': name,
-            'type': 'file',
-            'format': entry['format'],
-            'path': rel_path,
-            'size': entry['size'],
-            'size_display': format_size(entry['size']),
-            'modified': entry['modified'],
-            'files': [rel_path],
-            'file_count': 1,
-            'suggested_tags': suggest_tags(name),
-        })
+        record = build_root_catalog_record(entry, group_mode=group_mode)
+        models[record['id']] = record
 
     for grouped in snapshot.get('groups', {}).get(group_mode, {}).values():
-        group_path = relative_model_path(grouped['path'])
-        model_id = build_model_id(group_path, group_mode=group_mode)
-        file_entries = grouped['files']
-        total_size = sum(entry['size'] for entry in file_entries)
-        latest_modified = max(entry['modified'] for entry in file_entries)
-        file_list = [entry['rel_path'] for entry in file_entries]
-        main_file = choose_group_main_file(file_entries)
-        name = grouped['name']
-
-        clean_name = name
-        for sep in [' - ', ' -']:
-            parts = clean_name.rsplit(sep, 1)
-            if len(parts) == 2 and parts[1].strip().isdigit():
-                clean_name = parts[0].strip()
-
-        models[model_id] = normalize_catalog_record(model_id, {
-            'id': model_id,
-            'name': name,
-            'display_name': clean_name,
-            'type': 'folder' if group_mode == 'folder' else 'project',
-            'format': main_file['format'],
-            'path': group_path,
-            'main_file': main_file['rel_path'],
-            'size': total_size,
-            'size_display': format_size(total_size),
-            'modified': latest_modified,
-            'files': file_list,
-            'file_count': len(file_list),
-            'suggested_tags': suggest_tags(name),
-        })
+        record = build_group_catalog_record(
+            relative_model_path(grouped['path']),
+            grouped['name'],
+            grouped['files'],
+            group_mode=group_mode,
+        )
+        if record is not None:
+            models[record['id']] = record
 
     return models
 
@@ -565,6 +680,78 @@ def refresh_all_catalogs_unlocked(db):
         set_catalog_for_mode(db, scanned, group_mode=group_mode)
         sync_db_with_scan(db, scanned, group_mode=group_mode)
     db['last_scan'] = time.time()
+
+
+def refresh_incremental_catalogs_unlocked(db):
+    """Sadece yeni/değişen dosyaların etkilediği katalog kayıtlarını güncelle."""
+    has_all_catalogs = all(isinstance(get_catalog_for_mode(db, group_mode), dict) for group_mode in GROUP_MODES)
+    if db.get('last_scan') is None or not has_all_catalogs:
+        refresh_all_catalogs_unlocked(db)
+        return 'full', {
+            group_mode: set(get_catalog_for_mode(db, group_mode) or {})
+            for group_mode in GROUP_MODES
+        }
+
+    changes = scan_incremental_changes(db.get('last_scan'))
+    updated_ids = {group_mode: set() for group_mode in GROUP_MODES}
+
+    for group_mode in GROUP_MODES:
+        merged_catalog = normalize_catalog(get_catalog_for_mode(db, group_mode) or {})
+
+        for _, entry in changes['root_files'].items():
+            record = build_root_catalog_record(entry, group_mode=group_mode)
+            if merged_catalog.get(record['id']) != record:
+                updated_ids[group_mode].add(record['id'])
+            merged_catalog[record['id']] = record
+
+        for group_path in sorted(changes['groups'][group_mode]):
+            file_entries = collect_supported_files(
+                MODELS_DIR / group_path,
+                recursive=(group_mode == 'project'),
+            )
+            record = build_group_catalog_record(
+                group_path,
+                Path(group_path).name,
+                file_entries,
+                group_mode=group_mode,
+            )
+            if record is None:
+                continue
+            if merged_catalog.get(record['id']) != record:
+                updated_ids[group_mode].add(record['id'])
+            merged_catalog[record['id']] = record
+
+        set_catalog_for_mode(db, merged_catalog, group_mode=group_mode)
+        sync_db_with_scan(db, merged_catalog, group_mode=group_mode)
+
+    db['last_scan'] = time.time()
+    return 'incremental', updated_ids
+
+
+def run_scan(scan_mode='incremental', group_mode='folder'):
+    """İstenen tarama modunu çalıştır ve özet döndür."""
+    scan_mode = parse_scan_mode(scan_mode)
+    group_mode = parse_group_mode(group_mode)
+
+    with DB_LOCK:
+        db = _load_db_unlocked()
+        if scan_mode == 'full':
+            refresh_all_catalogs_unlocked(db)
+            actual_mode = 'full'
+            updated_ids = {
+                mode: set(get_catalog_for_mode(db, mode) or {})
+                for mode in GROUP_MODES
+            }
+        else:
+            actual_mode, updated_ids = refresh_incremental_catalogs_unlocked(db)
+
+        _save_db_unlocked(db)
+        scanned = get_catalog_for_mode(db, group_mode=group_mode) or {}
+        return scanned, {
+            'mode': actual_mode,
+            'updated': len(updated_ids.get(group_mode, set())),
+            'total': len(scanned),
+        }
 
 
 def _get_synced_state_unlocked(refresh=False, group_mode='folder'):
@@ -837,8 +1024,9 @@ def api_tags():
 def api_rescan():
     """Klasörü yeniden tara."""
     group_mode = parse_group_mode(request.args.get('group'))
-    _, scanned = get_synced_state(refresh=True, group_mode=group_mode)
-    return jsonify({'success': True, 'total': len(scanned)})
+    scan_mode = parse_scan_mode(request.args.get('mode'))
+    _, summary = run_scan(scan_mode=scan_mode, group_mode=group_mode)
+    return jsonify({'success': True, **summary})
 
 
 @app.route('/api/stats')
