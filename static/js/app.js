@@ -11,6 +11,13 @@ const state = {
     currentFormat: '',
     currentSort: 'name',
     currentGroupMode: localStorage.getItem('groupMode') === 'project' ? 'project' : 'folder',
+    currentMakerFilters: {
+        has_readme: false,
+        has_license: false,
+        has_cad: false,
+        has_gcode: false,
+        multipart: false,
+    },
     searchQuery: '',
     viewMode: 'grid',
     selectedModel: null,
@@ -29,6 +36,9 @@ const state = {
     thumbScheduled: false,
 };
 
+const IMAGE_FILE_FORMATS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif']);
+const TEXT_FILE_FORMATS = new Set(['txt', 'md']);
+
 // ─── DOM Refs ──────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -45,6 +55,7 @@ const dom = {
     sidebarBackdrop: $('#sidebarBackdrop'),
     tagList: $('#tagList'),
     formatChips: $('#formatChips'),
+    makerChips: $('#makerChips'),
     previewModal: $('#previewModal'),
     modalTitle: $('#modalTitle'),
     modalPrinted: $('#modalPrinted'),
@@ -55,10 +66,12 @@ const dom = {
     viewerLoading: $('#viewerLoading'),
     viewerControls: $('#viewerControls'),
     detailFormat: $('#detailFormat'),
+    detailFormats: $('#detailFormats'),
     detailSize: $('#detailSize'),
     detailFileCount: $('#detailFileCount'),
     detailType: $('#detailType'),
     detailPrinted: $('#detailPrinted'),
+    detailAssets: $('#detailAssets'),
     currentTags: $('#currentTags'),
     tagInput: $('#tagInput'),
     tagSuggestions: $('#tagSuggestions'),
@@ -67,6 +80,13 @@ const dom = {
     noteInput: $('#noteInput'),
     saveNoteBtn: $('#saveNoteBtn'),
     fileList: $('#fileList'),
+    makerInfoSection: $('#makerInfoSection'),
+    makerBadges: $('#makerBadges'),
+    printProfile: $('#printProfile'),
+    readmeExcerpt: $('#readmeExcerpt'),
+    resourceLinks: $('#resourceLinks'),
+    previewGallerySection: $('#previewGallerySection'),
+    previewGallery: $('#previewGallery'),
     toastContainer: $('#toastContainer'),
     btnFilters: $('#btnFilters'),
     btnRescan: $('#btnRescan'),
@@ -87,9 +107,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Thumbnail cache'i temizle (yeni render kalitesi)
     try {
         const ver = localStorage.getItem('thumbVersion');
-        if (ver !== 'v6') {
+        if (ver !== 'v7') {
             localStorage.removeItem('thumbCache');
-            localStorage.setItem('thumbVersion', 'v6');
+            localStorage.setItem('thumbVersion', 'v7');
         } else {
             const saved = localStorage.getItem('thumbCache');
             if (saved) state.thumbCache = JSON.parse(saved);
@@ -176,11 +196,72 @@ function buildPreviewUrl(filePath) {
     return `/api/preview/${encodeURIComponent(filePath)}`;
 }
 
+function getAllDisplayFiles(model) {
+    return model?.all_files || model?.files || [];
+}
+
+function formatAvailableFormats(formats = []) {
+    const normalized = formats.filter(Boolean).map((format) => String(format).toUpperCase());
+    return normalized.length ? normalized.join(', ') : '—';
+}
+
+function getMakerFlagLabel(flag) {
+    const labels = {
+        has_readme: 'README',
+        has_license: 'Lisans',
+        has_cad: 'CAD',
+        has_gcode: 'G-code',
+        multipart: 'Çok Parça',
+    };
+    return labels[flag] || flag;
+}
+
+function getMakerBadges(model) {
+    const badges = [];
+    if (model?.has_readme) badges.push('README');
+    if (model?.has_license) badges.push('Lisans');
+    if (model?.has_cad) badges.push('CAD');
+    if (model?.has_gcode) badges.push('G-code');
+    if (model?.preview_available) badges.push('Önizleme');
+    return badges;
+}
+
+function getPrintProfileLabel(key) {
+    const labels = {
+        resolution: 'Katman',
+        supports: 'Destek',
+        infill: 'Doluluk',
+        material: 'Malzeme',
+        nozzle: 'Nozul',
+    };
+    return labels[key] || key;
+}
+
+function getCardThumbnailState(model) {
+    if (state.thumbCache[model.id]) {
+        return { kind: 'cached', source: state.thumbCache[model.id] };
+    }
+    if (model.preview_images?.length) {
+        return { kind: 'image', source: buildFileUrl(model.preview_images[0]) };
+    }
+    if (model.main_file_has_embedded_preview && model.main_file) {
+        return { kind: 'image', source: buildPreviewUrl(model.main_file) };
+    }
+
+    const thumbFormat = String(model.main_file_format || model.format || '').toLowerCase();
+    if (thumbFormat === 'stl') {
+        return { kind: 'generated', format: thumbFormat };
+    }
+    return { kind: 'icon', format: thumbFormat };
+}
+
 function renderFileList(files = []) {
+    const modelFiles = new Set(state.selectedModel?.files || []);
     const items = files.map((filePath) => {
         const isActive = filePath === state.selectedFilePath;
         const fileFormat = getFileFormat(filePath).toUpperCase() || 'DOSYA';
         const fileName = getFileName(filePath);
+        const fileRole = modelFiles.has(filePath) ? 'MODEL' : 'EK';
         return `
             <li class="file-item ${isActive ? 'active' : ''}">
                 <button
@@ -191,7 +272,7 @@ function renderFileList(files = []) {
                     title="${escapeHtml(filePath)}"
                 >
                     <span class="file-name">${escapeHtml(fileName)}</span>
-                    <span class="file-format">${escapeHtml(fileFormat)}</span>
+                    <span class="file-format"><span class="file-role">${fileRole}</span>${escapeHtml(fileFormat)}</span>
                 </button>
                 <a
                     class="file-download"
@@ -253,8 +334,15 @@ async function runScan(scanMode = 'incremental') {
     try {
         const result = await api(withGroupMode(`/api/scan?mode=${normalizedMode}`), { method: 'POST' });
 
-        state.thumbCache = {};
-        localStorage.removeItem('thumbCache');
+        if (result.mode === 'full') {
+            state.thumbCache = {};
+            localStorage.removeItem('thumbCache');
+        } else {
+            for (const modelId of result.updated_ids || []) {
+                delete state.thumbCache[modelId];
+            }
+            saveThumbCache();
+        }
 
         await Promise.all([
             loadModels(),
@@ -309,7 +397,7 @@ function showSelectedFile(filePath) {
     if (!state.selectedModel || !filePath) return;
 
     state.selectedFilePath = filePath;
-    renderFileList(state.selectedModel.files || []);
+    renderFileList(getAllDisplayFiles(state.selectedModel));
 
     const fileFormat = getFileFormat(filePath) || state.selectedModel.format;
     dom.detailFormat.textContent = fileFormat.toUpperCase();
@@ -323,6 +411,15 @@ function showSelectedFile(filePath) {
         } else {
             load3MF(buildFileUrl(filePath), filePath);
         }
+        return;
+    }
+
+    if (IMAGE_FILE_FORMATS.has(fileFormat)) {
+        renderViewerImagePreview(
+            buildFileUrl(filePath),
+            `${getFileName(filePath)} görseli gösteriliyor.`,
+            'Görsel yüklenemedi.',
+        );
         return;
     }
 
@@ -343,6 +440,9 @@ async function loadModels() {
         if (state.currentFormat) params.set('format', state.currentFormat);
         if (state.currentSort) params.set('sort', state.currentSort);
         if (state.currentFilter === 'fav') params.set('fav', '1');
+        Object.entries(state.currentMakerFilters).forEach(([flag, enabled]) => {
+            if (enabled) params.set(flag, '1');
+        });
         params.set('group', state.currentGroupMode);
 
         const data = await api(`/api/models?${params}`);
@@ -1398,6 +1498,236 @@ function disposeViewer() {
 }
 
 // ─── Helpers ───────────────────────────────────────────────
+function renderPrintedState(model) {
+    const printed = Boolean(model?.printed);
+    dom.modalPrinted.classList.toggle('active', printed);
+    dom.detailPrinted.textContent = printed ? 'Yazdırıldı' : 'Bekliyor';
+}
+
+function showSelectedFile(filePath) {
+    if (!state.selectedModel || !filePath) return;
+
+    state.selectedFilePath = filePath;
+    renderFileList(getAllDisplayFiles(state.selectedModel));
+
+    const fileFormat = getFileFormat(filePath) || state.selectedModel.format;
+    dom.detailFormat.textContent = fileFormat.toUpperCase();
+
+    if (fileFormat === 'stl' || fileFormat === '3mf') {
+        showViewerLoading(`${fileFormat.toUpperCase()} model yükleniyor...`);
+        setViewerControlsVisible(true);
+        if (!state.renderer) initViewer();
+        if (fileFormat === 'stl') {
+            loadSTL(buildFileUrl(filePath), filePath);
+        } else {
+            load3MF(buildFileUrl(filePath), filePath);
+        }
+        return;
+    }
+
+    if (IMAGE_FILE_FORMATS.has(fileFormat)) {
+        renderViewerImagePreview(
+            buildFileUrl(filePath),
+            `${getFileName(filePath)} görseli gösteriliyor.`,
+            'Görsel yüklenemedi.',
+        );
+        return;
+    }
+
+    disposeViewer();
+    const message = TEXT_FILE_FORMATS.has(fileFormat)
+        ? `${fileFormat.toUpperCase()} dokümanı seçildi. Dosya listesinden indirerek açabilirsiniz.`
+        : `${fileFormat.toUpperCase()} dosyası seçildi. Etkileşimli 3D önizleme şu an yalnızca STL ve 3MF için mevcut.`;
+    renderViewerMessage(getFormatIcon(fileFormat), message);
+}
+
+function renderGrid() {
+    if (state.models.length === 0) {
+        dom.modelGrid.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">📂</div>
+                <h3>Model bulunamadı</h3>
+                <p>Arama kriterlerini değiştirmeyi deneyin</p>
+            </div>
+        `;
+        return;
+    }
+
+    dom.modelGrid.innerHTML = state.models.map((m) => {
+        const tags = (m.tags || []).slice(0, 3);
+        const isFav = m.favorite ? 'active' : '';
+        const isPrinted = m.printed ? '<span class="printed-badge">✅ Yazdırıldı</span>' : '';
+        const fileCount = m.file_count > 1 ? `<span class="file-count-badge">${m.file_count} dosya</span>` : '';
+        const displayName = escapeHtml(m.display_name || m.name);
+        const rawName = escapeHtml(m.name || '');
+        const metaType = getModelTypeLabel(m.type);
+        const thumbState = getCardThumbnailState(m);
+        const thumbFormat = escapeHtml(m.main_file_format || m.format || '');
+        let thumbContent = `<span class="thumb-icon">${getFormatIcon(m.main_file_format || m.format)}</span>`;
+        if (thumbState.kind === 'cached' || thumbState.kind === 'image') {
+            thumbContent = `<img src="${thumbState.source}" alt="${displayName}" style="width:100%;height:100%;object-fit:contain;">`;
+        } else if (thumbState.kind === 'generated') {
+            thumbContent = `<div class="thumb-loading" data-model-id="${m.id}"><div class="mini-spinner"></div><span>Yükleniyor</span></div>`;
+        }
+        const makerBadges = getMakerBadges(m).slice(0, 3);
+        const assetLabel = m.asset_count ? `<span class="card-support-tag">+${m.asset_count} ek</span>` : '';
+
+        return `
+            <div class="model-card" data-id="${m.id}">
+                <div class="card-thumbnail" data-thumb-id="${m.id}" data-format="${thumbFormat}" data-thumb-kind="${thumbState.kind}">
+                    <span class="format-badge">${escapeHtml((m.main_file_format || m.format || '').toUpperCase())}</span>
+                    ${fileCount}
+                    ${thumbContent}
+                    ${isPrinted}
+                    <div class="card-favorite ${isFav}" data-action="favorite" role="button" tabindex="0" aria-label="Favori">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                        </svg>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="card-name" title="${rawName}">${displayName}</div>
+                    <div class="card-meta">
+                        <span>${escapeHtml(m.size_display)}</span>
+                        <span>${metaType}</span>
+                    </div>
+                    <div class="card-supports">
+                        ${makerBadges.map((badge) => `<span class="card-support-tag">${escapeHtml(badge)}</span>`).join('')}
+                        ${assetLabel}
+                    </div>
+                    <div class="card-tags">
+                        ${tags.map((tag) => `<span class="card-tag">${escapeHtml(tag)}</span>`).join('')}
+                        ${m.tags && m.tags.length > 3 ? `<span class="card-tag">+${m.tags.length - 3}</span>` : ''}
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    setupThumbnailObserver();
+}
+
+function setupThumbnailObserver() {
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            const el = entry.target;
+            const modelId = el.dataset.thumbId;
+            if (el.dataset.thumbKind === 'generated' && !state.thumbCache[modelId]) {
+                queueThumbnail(modelId);
+            }
+            observer.unobserve(el);
+        });
+    }, {
+        rootMargin: '200px',
+        threshold: 0,
+    });
+
+    document.querySelectorAll('.card-thumbnail[data-thumb-kind="generated"]').forEach((el) => {
+        if (!state.thumbCache[el.dataset.thumbId]) {
+            observer.observe(el);
+        }
+    });
+}
+
+function renderMakerDetails(model) {
+    const badges = getMakerBadges(model);
+    dom.makerBadges.innerHTML = badges.length
+        ? badges.map((badge) => `<span class="detail-badge">${escapeHtml(badge)}</span>`).join('')
+        : '<span class="empty-note">Ek maker metadata bulunamadı.</span>';
+
+    const profileEntries = Object.entries(model.print_profile || {});
+    dom.printProfile.innerHTML = profileEntries.map(([key, value]) => `
+        <div class="profile-item">
+            <span>${escapeHtml(getPrintProfileLabel(key))}</span>
+            <strong>${escapeHtml(value)}</strong>
+        </div>
+    `).join('');
+
+    dom.readmeExcerpt.textContent = model.readme_excerpt || '';
+    dom.readmeExcerpt.hidden = !model.readme_excerpt;
+
+    const links = [];
+    if (model.readme_path) {
+        links.push(`<a class="resource-link" href="${buildFileUrl(model.readme_path)}" target="_blank" rel="noreferrer">README</a>`);
+    }
+    if (model.license_path) {
+        links.push(`<a class="resource-link" href="${buildFileUrl(model.license_path)}" target="_blank" rel="noreferrer">Lisans</a>`);
+    }
+    if (model.source_url) {
+        links.push(`<a class="resource-link" href="${escapeHtml(model.source_url)}" target="_blank" rel="noreferrer">Kaynak</a>`);
+    }
+    dom.resourceLinks.innerHTML = links.join('');
+
+    const hasContent = badges.length || profileEntries.length || model.readme_excerpt || links.length;
+    dom.makerInfoSection.hidden = !hasContent;
+}
+
+function renderPreviewGallery(model) {
+    const images = (model.preview_images || []).slice(0, 8);
+    if (!images.length) {
+        dom.previewGallery.innerHTML = '';
+        dom.previewGallerySection.hidden = true;
+        return;
+    }
+
+    dom.previewGallery.innerHTML = images.map((filePath) => `
+        <button type="button" class="preview-thumb" data-file-path="${escapeHtml(filePath)}">
+            <img src="${buildFileUrl(filePath)}" alt="${escapeHtml(getFileName(filePath))}">
+        </button>
+    `).join('');
+    dom.previewGallerySection.hidden = false;
+}
+
+function openPreview(modelId) {
+    const model = state.models.find((item) => item.id === modelId);
+    if (!model) return;
+
+    state.selectedModel = model;
+    dom.previewModal.classList.add('visible');
+    document.body.style.overflow = 'hidden';
+    setSidebarOpen(false);
+
+    dom.modalTitle.textContent = model.display_name || model.name;
+    renderPrintedState(model);
+    dom.modalFavorite.classList.toggle('active', model.favorite);
+    dom.detailFormat.textContent = String(model.main_file_format || model.format || '').toUpperCase();
+    dom.detailFormats.textContent = formatAvailableFormats(model.available_formats || [model.format]);
+    dom.detailSize.textContent = model.size_display;
+    dom.detailFileCount.textContent = model.file_count;
+    dom.detailType.textContent = getModelDetailType(model.type);
+    dom.detailAssets.textContent = `${model.asset_count || 0} dosya`;
+    dom.noteInput.value = model.note || '';
+
+    renderModalTags();
+    renderSuggestedTags();
+    renderMakerDetails(model);
+    renderPreviewGallery(model);
+    loadTagSuggestions();
+
+    const filePath = model.main_file || model.path;
+    showSelectedFile(filePath);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    dom.makerChips?.addEventListener('click', (e) => {
+        const chip = e.target.closest('.chip');
+        if (!chip) return;
+        const flag = chip.dataset.flag;
+        if (!flag) return;
+        state.currentMakerFilters[flag] = !state.currentMakerFilters[flag];
+        chip.classList.toggle('active', state.currentMakerFilters[flag]);
+        loadModels();
+        if (isMobileViewport()) setSidebarOpen(false);
+    });
+
+    dom.previewGallery?.addEventListener('click', (e) => {
+        const button = e.target.closest('[data-file-path]');
+        if (!button) return;
+        showSelectedFile(button.dataset.filePath || '');
+    });
+});
+
 function showLoading(visible) {
     dom.loadingOverlay.classList.toggle('visible', visible);
 }

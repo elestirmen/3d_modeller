@@ -102,7 +102,7 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(set(db['models']), {project_id, folder_id})
         self.assertEqual(db['models'][project_id]['tags'], ['live'])
 
-    def test_incremental_scan_adds_new_model_without_pruning_stale_entries(self):
+    def test_incremental_scan_prunes_stale_entries_and_reports_diff(self):
         models_root = Path(self.temp_dir.name) / '3d models'
         models_root.mkdir(parents=True)
         (models_root / 'existing.stl').write_bytes(b'abc')
@@ -141,10 +141,12 @@ class AppBehaviorTests(unittest.TestCase):
 
         self.assertEqual(scan_response.status_code, 200)
         self.assertEqual(scan_response.get_json()['mode'], 'incremental')
-        self.assertEqual(scan_response.get_json()['updated'], 1)
+        self.assertEqual(scan_response.get_json()['updated'], 2)
+        self.assertEqual(len(scan_response.get_json()['updated_ids']), 2)
+        self.assertIn(stale_id, scan_response.get_json()['updated_ids'])
 
         model_paths = {model['path'] for model in models_response.get_json()['models']}
-        self.assertEqual(model_paths, {'existing.stl', 'new.stl', 'ghost.stl'})
+        self.assertEqual(model_paths, {'existing.stl', 'new.stl'})
 
     def test_stats_and_tags_ignore_stale_entries(self):
         project_id = app.build_model_id('real-model.stl', group_mode='project')
@@ -211,7 +213,7 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(encoding='utf-8'), '{invalid')
 
-    def test_scan_prefers_stl_main_file_when_project_contains_multiple_formats(self):
+    def test_scan_prefers_3mf_main_file_when_project_contains_multiple_formats(self):
         models_root = Path(self.temp_dir.name) / '3d models'
         project_dir = models_root / 'mixed-project'
         project_dir.mkdir(parents=True)
@@ -226,8 +228,102 @@ class AppBehaviorTests(unittest.TestCase):
             app.MODELS_DIR = original_models_dir
 
         model = next(iter(scanned.values()))
-        self.assertEqual(model['format'], 'stl')
-        self.assertEqual(model['main_file'], 'mixed-project/small.stl')
+        self.assertEqual(model['format'], '3mf')
+        self.assertEqual(model['main_file'], 'mixed-project/large.3mf')
+        self.assertEqual(model['main_file_format'], '3mf')
+
+    def test_scan_collects_maker_metadata_and_support_files(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        project_dir = models_root / 'maker-project'
+        project_dir.mkdir(parents=True)
+        (project_dir / 'part.stl').write_bytes(b'abc')
+        (project_dir / 'preview.png').write_bytes(PNG_1X1)
+        (project_dir / 'guide.pdf').write_bytes(b'%PDF-1.4')
+        (project_dir / 'assembly.gcode').write_bytes(b'G28')
+        (project_dir / 'source.step').write_text('STEP', encoding='utf-8')
+        (project_dir / 'bundle.zip').write_bytes(b'PK\x03\x04')
+        (project_dir / 'LICENSE.txt').write_text('CC-BY', encoding='utf-8')
+        (project_dir / 'README.txt').write_text(
+            'Thingiverse: https://example.com/model\n'
+            'Resolution: 0.2\n'
+            'Supports: Yes\n'
+            'Infill: 15%\n'
+            'Filament Material: PLA\n',
+            encoding='utf-8',
+        )
+
+        original_models_dir = app.MODELS_DIR
+        app.MODELS_DIR = models_root
+        try:
+            scanned = app.scan_models('project')
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        model = next(iter(scanned.values()))
+        self.assertTrue(model['has_readme'])
+        self.assertTrue(model['has_license'])
+        self.assertTrue(model['has_cad'])
+        self.assertTrue(model['has_gcode'])
+        self.assertEqual(model['readme_path'], 'maker-project/README.txt')
+        self.assertIn('maker-project/preview.png', model['preview_images'])
+        self.assertIn('maker-project/source.step', model['cad_files'])
+        self.assertIn('maker-project/assembly.gcode', model['gcode_files'])
+        self.assertIn('maker-project/guide.pdf', model['document_files'])
+        self.assertIn('maker-project/bundle.zip', model['archive_files'])
+        self.assertIn('part.stl', model['main_file'])
+        self.assertEqual(model['print_profile']['supports'], 'Yes')
+        self.assertEqual(model['print_profile']['material'], 'PLA')
+        self.assertEqual(model['source_url'], 'https://example.com/model')
+        self.assertGreaterEqual(model['asset_count'], 6)
+
+    def test_models_endpoint_filters_by_maker_metadata(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        rich_dir = models_root / 'rich-project'
+        plain_dir = models_root / 'plain-project'
+        rich_dir.mkdir(parents=True)
+        plain_dir.mkdir(parents=True)
+        (rich_dir / 'part.stl').write_bytes(b'abc')
+        (rich_dir / 'README.txt').write_text('Supports: No', encoding='utf-8')
+        (rich_dir / 'source.step').write_text('STEP', encoding='utf-8')
+        (plain_dir / 'part.stl').write_bytes(b'def')
+
+        original_models_dir = app.MODELS_DIR
+        app.MODELS_DIR = models_root
+        try:
+            response_readme = self.client.get('/api/models?group=project&has_readme=1')
+            response_cad = self.client.get('/api/models?group=project&has_cad=1')
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        self.assertEqual(response_readme.status_code, 200)
+        self.assertEqual(response_readme.get_json()['total'], 1)
+        self.assertEqual(response_readme.get_json()['models'][0]['display_name'], 'rich-project')
+
+        self.assertEqual(response_cad.status_code, 200)
+        self.assertEqual(response_cad.get_json()['total'], 1)
+        self.assertTrue(response_cad.get_json()['models'][0]['has_cad'])
+
+    def test_folder_group_mode_collapses_generic_files_folder_into_parent_project(self):
+        models_root = Path(self.temp_dir.name) / '3d models'
+        project_dir = models_root / 'pool-project'
+        files_dir = project_dir / 'files'
+        files_dir.mkdir(parents=True)
+        (files_dir / 'part.stl').write_bytes(b'abc')
+        (project_dir / 'README.txt').write_text('Assembly guide', encoding='utf-8')
+
+        original_models_dir = app.MODELS_DIR
+        app.MODELS_DIR = models_root
+        try:
+            response = self.client.get('/api/models')
+        finally:
+            app.MODELS_DIR = original_models_dir
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['total'], 1)
+        model = response.get_json()['models'][0]
+        self.assertEqual(model['display_name'], 'pool-project')
+        self.assertEqual(model['path'], 'pool-project')
+        self.assertTrue(model['has_readme'])
 
     def test_file_endpoint_supports_download_mode(self):
         models_root = Path(self.temp_dir.name) / '3d models'

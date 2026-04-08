@@ -8,6 +8,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -31,7 +32,30 @@ GROUP_MODES = ('project', 'folder')
 SCAN_MODES = ('incremental', 'full')
 
 # Desteklenen dosya formatları
-SUPPORTED_FORMATS = {'.stl', '.3mf', '.obj', '.gltf', '.glb', '.fbx', '.ply'}
+SUPPORTED_MODEL_FORMATS = {'.stl', '.3mf', '.obj', '.gltf', '.glb', '.fbx', '.ply'}
+SUPPORTED_IMAGE_FORMATS = {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
+SUPPORTED_DOCUMENT_FORMATS = {'.pdf', '.txt', '.md'}
+SUPPORTED_ARCHIVE_FORMATS = {'.zip', '.rar', '.7z'}
+SUPPORTED_CAD_FORMATS = {'.step', '.stp', '.scad', '.skp', '.f3d', '.x_t', '.dxf'}
+SUPPORTED_MACHINE_FORMATS = {'.gcode'}
+SUPPORTED_FILE_FORMATS = (
+    SUPPORTED_MODEL_FORMATS
+    | SUPPORTED_IMAGE_FORMATS
+    | SUPPORTED_DOCUMENT_FORMATS
+    | SUPPORTED_ARCHIVE_FORMATS
+    | SUPPORTED_CAD_FORMATS
+    | SUPPORTED_MACHINE_FORMATS
+)
+GENERIC_GROUP_DIR_NAMES = {'files', '_files', 'models', 'stls', 'mesh', 'meshes'}
+MAIN_FILE_FORMAT_PRIORITY = {
+    '3mf': 0,
+    'stl': 1,
+    'obj': 2,
+    'glb': 3,
+    'gltf': 4,
+    'fbx': 5,
+    'ply': 6,
+}
 THREEMF_PREVIEW_CANDIDATES = (
     'Auxiliaries/.thumbnails/thumbnail_3mf.png',
     'Auxiliaries/.thumbnails/thumbnail_middle.png',
@@ -98,40 +122,124 @@ def relative_model_path(path_obj):
     return normalize_catalog_path(path_obj.relative_to(MODELS_DIR).as_posix())
 
 
+def normalize_path_list(values):
+    """Göreli dosya yollarını normalize et, boş ve tekrar edenleri at."""
+    normalized = []
+    seen = set()
+    for item in values or []:
+        normalized_item = normalize_catalog_path(item)
+        if not normalized_item or normalized_item in seen:
+            continue
+        normalized.append(normalized_item)
+        seen.add(normalized_item)
+    return normalized
+
+
+def normalize_string_list(values, lower=False):
+    """Dizileri temizle, tekrarları kaldır ve gerekirse küçült."""
+    normalized = []
+    seen = set()
+    for item in values or []:
+        text = str(item).strip()
+        if not text:
+            continue
+        if lower:
+            text = text.lower()
+        if text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
+
+
+def normalize_print_profile(profile):
+    """README'den türetilen baskı profilini temizle."""
+    if not isinstance(profile, dict):
+        return {}
+
+    normalized = {}
+    for raw_key, raw_value in profile.items():
+        key = str(raw_key).strip().lower().replace(' ', '_')
+        value = str(raw_value).strip()
+        if key and value:
+            normalized[key] = value
+    return normalized
+
+
 def normalize_catalog_record(model_id, record=None):
     """Tarama katalog kaydını API için güvenli ve tutarlı hale getir."""
     if not isinstance(record, dict):
         return None
 
     path = normalize_catalog_path(record.get('path'))
-    files = []
-    for item in record.get('files', []):
-        normalized_item = normalize_catalog_path(item)
-        if normalized_item:
-            files.append(normalized_item)
-
+    files = normalize_path_list(record.get('files', []))
     if not files and path:
         files = [path]
 
+    all_files = normalize_path_list(record.get('all_files', files))
+    if not all_files:
+        all_files = list(files)
+
     size = coerce_int(record.get('size'), default=0)
+    available_formats = normalize_string_list(record.get('available_formats', []), lower=True)
+    format_value = str(record.get('format', '')).lower()
+    if not available_formats and format_value:
+        available_formats = [format_value]
+
+    preview_images = normalize_path_list(record.get('preview_images', []))
+    cad_files = normalize_path_list(record.get('cad_files', []))
+    gcode_files = normalize_path_list(record.get('gcode_files', []))
+    document_files = normalize_path_list(record.get('document_files', []))
+    archive_files = normalize_path_list(record.get('archive_files', []))
+    print_profile = normalize_print_profile(record.get('print_profile'))
+    readme_path = normalize_catalog_path(record.get('readme_path'))
+    license_path = normalize_catalog_path(record.get('license_path'))
+    readme_excerpt = str(record.get('readme_excerpt') or '').strip()
+    source_url = str(record.get('source_url') or '').strip()
+
     normalized = {
         'id': str(model_id),
         'name': str(record.get('name') or model_id),
         'display_name': str(record.get('display_name') or record.get('name') or model_id),
         'type': record.get('type') if record.get('type') in {'project', 'folder'} else 'file',
-        'format': str(record.get('format', '')).lower(),
+        'format': format_value,
         'path': path,
         'size': size,
         'size_display': str(record.get('size_display') or format_size(size)),
         'modified': coerce_float(record.get('modified'), default=0.0),
         'files': files,
+        'all_files': all_files,
         'file_count': coerce_int(record.get('file_count'), default=len(files) or 1),
+        'asset_count': coerce_int(record.get('asset_count'), default=max(len(all_files) - len(files), 0)),
+        'available_formats': available_formats,
         'suggested_tags': [str(tag).strip() for tag in record.get('suggested_tags', []) if str(tag).strip()],
+        'preview_images': preview_images,
+        'cad_files': cad_files,
+        'gcode_files': gcode_files,
+        'document_files': document_files,
+        'archive_files': archive_files,
+        'has_readme': bool(readme_path),
+        'has_license': bool(license_path),
+        'has_cad': bool(cad_files),
+        'has_gcode': bool(gcode_files),
+        'print_profile': print_profile,
+        'preview_available': bool(record.get('preview_available', preview_images)),
     }
 
     main_file = normalize_catalog_path(record.get('main_file'))
     if main_file:
         normalized['main_file'] = main_file
+        normalized['main_file_format'] = str(record.get('main_file_format') or Path(main_file).suffix.lstrip('.')).lower()
+        normalized['main_file_has_embedded_preview'] = bool(record.get('main_file_has_embedded_preview', False))
+
+    if readme_path:
+        normalized['readme_path'] = readme_path
+    if license_path:
+        normalized['license_path'] = license_path
+    if readme_excerpt:
+        normalized['readme_excerpt'] = readme_excerpt
+    if source_url:
+        normalized['source_url'] = source_url
 
     return normalized
 
@@ -150,9 +258,9 @@ def normalize_catalog(catalog=None):
     return normalized
 
 
-def resolve_model_file_path(filepath):
-    """API'den gelen göreli model yolunu güvenli şekilde çöz."""
-    full_path = MODELS_DIR / filepath
+def resolve_catalog_file_path(filepath):
+    """API'den gelen göreli katalog yolunu güvenli şekilde çöz."""
+    full_path = MODELS_DIR / normalize_catalog_path(filepath)
     if not full_path.exists() or not full_path.is_file():
         abort(404)
 
@@ -161,10 +269,22 @@ def resolve_model_file_path(filepath):
     except ValueError:
         abort(403)
 
-    if full_path.suffix.lower() not in SUPPORTED_FORMATS:
+    if full_path.suffix.lower() not in SUPPORTED_FILE_FORMATS:
         abort(404)
 
     return full_path
+
+
+def has_3mf_preview(full_path):
+    """3MF dosyasında gömülü bir önizleme görseli olup olmadığını kontrol et."""
+    if Path(full_path).suffix.lower() != '.3mf':
+        return False
+
+    try:
+        with zipfile.ZipFile(full_path, 'r') as archive:
+            return find_3mf_preview_entry(archive) is not None
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 
 def find_3mf_preview_entry(zip_file):
@@ -346,17 +466,173 @@ def suggest_tags(name):
     return suggested
 
 
+def clean_display_name(name):
+    """İndirilen proje adlarını kullanıcıya daha okunur göster."""
+    clean_name = str(name or '').strip()
+    for sep in [' - ', ' -']:
+        parts = clean_name.rsplit(sep, 1)
+        if len(parts) == 2 and parts[1].strip().isdigit():
+            clean_name = parts[0].strip()
+    return clean_name or str(name or '').strip()
+
+
+def normalize_group_directory(root_path, group_mode='folder'):
+    """Gürültülü yardımcı klasörleri ana proje köküne bağla."""
+    root_path = Path(root_path)
+    if group_mode == 'project':
+        rel_root = root_path.relative_to(MODELS_DIR)
+        return MODELS_DIR / rel_root.parts[0]
+
+    group_dir = root_path
+    while group_dir.parent != MODELS_DIR and group_dir.name.lower() in GENERIC_GROUP_DIR_NAMES:
+        group_dir = group_dir.parent
+    return group_dir
+
+
+def build_text_excerpt(text, max_lines=3, max_chars=320):
+    """README içeriğinden kısa bir özet çıkar."""
+    lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    excerpt = ' '.join(lines[:max_lines]).strip()
+    if len(excerpt) <= max_chars:
+        return excerpt
+    return excerpt[: max_chars - 1].rstrip() + '…'
+
+
+def extract_source_url(text):
+    """README içindeki ilk kaynak/ürün bağlantısını bul."""
+    match = re.search(r'https?://\S+', str(text))
+    if not match:
+        return ''
+    return match.group(0).rstrip(').,;')
+
+
+def extract_print_profile(text):
+    """README metninden temel baskı parametrelerini ayıkla."""
+    patterns = {
+        'resolution': r'(?:resolution|layer height)\s*:\s*([^\n\r]+)',
+        'supports': r'supports?\s*:\s*([^\n\r]+)',
+        'infill': r'infill\s*:\s*([^\n\r]+)',
+        'material': r'(?:filament material|material)\s*:\s*([^\n\r]+)',
+        'nozzle': r'nozzle\s*:\s*([^\n\r]+)',
+    }
+
+    profile = {}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, str(text), flags=re.IGNORECASE)
+        if match:
+            profile[key] = match.group(1).strip(' .')
+    return profile
+
+
+def read_text_metadata(path_obj):
+    """Metin dosyasını güvenle okuyup maker metadata üret."""
+    try:
+        text = Path(path_obj).read_text(encoding='utf-8', errors='ignore')
+    except OSError:
+        return {'excerpt': '', 'source_url': '', 'print_profile': {}}
+
+    return {
+        'excerpt': build_text_excerpt(text),
+        'source_url': extract_source_url(text),
+        'print_profile': extract_print_profile(text),
+    }
+
+
+def iter_directory_files(directory, recursive=False):
+    """Bir dizindeki dosyaları sıralı şekilde dolaş."""
+    directory = Path(directory)
+    if not directory.exists():
+        return
+
+    if recursive:
+        for root, dirs, files in os.walk(directory):
+            dirs.sort()
+            files.sort()
+            root_path = Path(root)
+            for filename in files:
+                yield root_path / filename
+        return
+
+    for child in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
+        if child.is_file():
+            yield child
+
+
+def is_related_root_sidecar(file_path, model_path):
+    """Kökte duran tekil model için aynı ada bağlı yan dosyaları seç."""
+    file_path = Path(file_path)
+    model_path = Path(model_path)
+    if file_path == model_path:
+        return False
+    return file_path.stem.lower() == model_path.stem.lower()
+
+
+def collect_sidecar_assets(directory, recursive=True, model_path=None):
+    """Model grubuna eşlik eden doküman, görsel, CAD ve arşiv dosyalarını topla."""
+    assets = {
+        'preview_images': [],
+        'cad_files': [],
+        'gcode_files': [],
+        'document_files': [],
+        'archive_files': [],
+        'readme_path': '',
+        'license_path': '',
+        'readme_excerpt': '',
+        'source_url': '',
+        'print_profile': {},
+    }
+
+    for file_path in iter_directory_files(directory, recursive=recursive) or []:
+        ext = file_path.suffix.lower()
+        if ext in SUPPORTED_MODEL_FORMATS:
+            continue
+        if model_path is not None and not is_related_root_sidecar(file_path, model_path):
+            continue
+        if ext not in SUPPORTED_FILE_FORMATS:
+            continue
+
+        rel_path = relative_model_path(file_path)
+        lowered_name = file_path.name.lower()
+
+        if lowered_name.startswith('readme'):
+            assets['readme_path'] = rel_path
+        if lowered_name.startswith('license'):
+            assets['license_path'] = rel_path
+
+        if ext in SUPPORTED_IMAGE_FORMATS:
+            assets['preview_images'].append(rel_path)
+        elif ext in SUPPORTED_CAD_FORMATS:
+            assets['cad_files'].append(rel_path)
+        elif ext in SUPPORTED_MACHINE_FORMATS:
+            assets['gcode_files'].append(rel_path)
+        elif ext in SUPPORTED_DOCUMENT_FORMATS:
+            assets['document_files'].append(rel_path)
+        elif ext in SUPPORTED_ARCHIVE_FORMATS:
+            assets['archive_files'].append(rel_path)
+
+    if assets['readme_path']:
+        text_meta = read_text_metadata(MODELS_DIR / assets['readme_path'])
+        assets['readme_excerpt'] = text_meta['excerpt']
+        assets['source_url'] = text_meta['source_url']
+        assets['print_profile'] = text_meta['print_profile']
+
+    return assets
+
+
 def choose_group_main_file(file_entries):
     """Önizleme için en uygun ana dosyayı seç."""
-    preferred_files = [entry for entry in file_entries if entry['format'] == 'stl']
-    candidates = preferred_files or list(file_entries)
-    return max(candidates, key=lambda entry: (entry['size'], entry['rel_path'].lower()))
+    def sort_key(entry):
+        format_priority = MAIN_FILE_FORMAT_PRIORITY.get(entry['format'], 99)
+        preview_priority = 0 if entry.get('has_preview') else 1
+        return (format_priority, preview_priority, -entry['size'], entry['rel_path'].lower())
+
+    return min(file_entries, key=sort_key)
 
 
 def build_file_entry(file_path, stat_result=None):
     """Desteklenen bir model dosyası için standart tarama kaydı üret."""
     ext = file_path.suffix.lower()
-    if ext not in SUPPORTED_FORMATS:
+    if ext not in SUPPORTED_MODEL_FORMATS:
         return None
 
     try:
@@ -372,6 +648,7 @@ def build_file_entry(file_path, stat_result=None):
         'rel_path': relative_model_path(file_path),
         'size': stat.st_size,
         'modified': stat.st_mtime,
+        'has_preview': has_3mf_preview(file_path) if ext == '.3mf' else False,
     }
 
 
@@ -380,6 +657,8 @@ def build_root_catalog_record(entry, group_mode='project'):
     rel_path = entry['rel_path']
     model_id = build_model_id(rel_path, group_mode=group_mode)
     name = entry['name']
+    sidecar_assets = collect_sidecar_assets(entry['root_path'], recursive=False, model_path=entry['path_obj'])
+    all_files = normalize_path_list([rel_path, *sidecar_assets['preview_images'], *sidecar_assets['cad_files'], *sidecar_assets['gcode_files'], *sidecar_assets['document_files'], *sidecar_assets['archive_files']])
 
     return normalize_catalog_record(model_id, {
         'id': model_id,
@@ -388,12 +667,20 @@ def build_root_catalog_record(entry, group_mode='project'):
         'type': 'file',
         'format': entry['format'],
         'path': rel_path,
+        'main_file': rel_path,
+        'main_file_format': entry['format'],
+        'main_file_has_embedded_preview': entry.get('has_preview', False),
         'size': entry['size'],
         'size_display': format_size(entry['size']),
         'modified': entry['modified'],
         'files': [rel_path],
+        'all_files': all_files,
         'file_count': 1,
+        'asset_count': max(len(all_files) - 1, 0),
+        'available_formats': [entry['format']],
+        'preview_available': bool(sidecar_assets['preview_images'] or entry.get('has_preview')),
         'suggested_tags': suggest_tags(name),
+        **sidecar_assets,
     })
 
 
@@ -408,52 +695,46 @@ def build_group_catalog_record(group_path, group_name, file_entries, group_mode=
     latest_modified = max(entry['modified'] for entry in file_entries)
     file_list = [entry['rel_path'] for entry in file_entries]
     main_file = choose_group_main_file(file_entries)
-
-    clean_name = group_name
-    for sep in [' - ', ' -']:
-        parts = clean_name.rsplit(sep, 1)
-        if len(parts) == 2 and parts[1].strip().isdigit():
-            clean_name = parts[0].strip()
+    sidecar_assets = collect_sidecar_assets(MODELS_DIR / group_path, recursive=True)
+    available_formats = sorted({entry['format'] for entry in file_entries}, key=lambda item: MAIN_FILE_FORMAT_PRIORITY.get(item, 99))
+    all_files = normalize_path_list([
+        *file_list,
+        *sidecar_assets['preview_images'],
+        *sidecar_assets['cad_files'],
+        *sidecar_assets['gcode_files'],
+        *sidecar_assets['document_files'],
+        *sidecar_assets['archive_files'],
+    ])
 
     return normalize_catalog_record(model_id, {
         'id': model_id,
         'name': group_name,
-        'display_name': clean_name,
+        'display_name': clean_display_name(group_name),
         'type': 'folder' if group_mode == 'folder' else 'project',
         'format': main_file['format'],
         'path': group_path,
         'main_file': main_file['rel_path'],
+        'main_file_format': main_file['format'],
+        'main_file_has_embedded_preview': main_file.get('has_preview', False),
         'size': total_size,
         'size_display': format_size(total_size),
         'modified': latest_modified,
         'files': file_list,
+        'all_files': all_files,
         'file_count': len(file_list),
+        'asset_count': max(len(all_files) - len(file_list), 0),
+        'available_formats': available_formats,
+        'preview_available': bool(sidecar_assets['preview_images'] or main_file.get('has_preview')),
         'suggested_tags': suggest_tags(group_name),
+        **sidecar_assets,
     })
 
 
 def collect_supported_files(directory, recursive=False):
     """Dizin içindeki desteklenen model dosyalarını topla."""
-    directory = Path(directory)
-    if not directory.exists():
-        return []
-
     entries = []
-    if recursive:
-        for root, dirs, files in os.walk(directory):
-            dirs.sort()
-            files.sort()
-            root_path = Path(root)
-            for filename in files:
-                entry = build_file_entry(root_path / filename)
-                if entry is not None:
-                    entries.append(entry)
-        return entries
-
-    for child in sorted(directory.iterdir(), key=lambda item: item.name.lower()):
-        if not child.is_file():
-            continue
-        entry = build_file_entry(child)
+    for file_path in iter_directory_files(directory, recursive=recursive) or []:
+        entry = build_file_entry(file_path)
         if entry is not None:
             entries.append(entry)
     return entries
@@ -516,35 +797,17 @@ def scan_model_snapshot():
 
         for filename in files:
             file_path = root_path / filename
-            ext = file_path.suffix.lower()
-
-            if ext not in SUPPORTED_FORMATS:
+            entry = build_file_entry(file_path)
+            if entry is None:
                 continue
-
-            try:
-                stat = file_path.stat()
-            except OSError:
-                continue
-
-            entry = {
-                'path_obj': file_path,
-                'root_path': root_path,
-                'name': file_path.stem,
-                'format': ext.lstrip('.'),
-                'rel_path': relative_model_path(file_path),
-                'size': stat.st_size,
-                'modified': stat.st_mtime,
-            }
 
             if root_path == MODELS_DIR:
                 snapshot['root_files'].append(entry)
                 continue
 
-            rel_root = root_path.relative_to(MODELS_DIR)
-            project_dir = MODELS_DIR / rel_root.parts[0]
             grouped_dirs = {
-                'project': project_dir,
-                'folder': root_path,
+                'project': normalize_group_directory(root_path, group_mode='project'),
+                'folder': normalize_group_directory(root_path, group_mode='folder'),
             }
 
             for group_mode, group_dir in grouped_dirs.items():
@@ -672,6 +935,17 @@ def set_catalog_for_mode(db, scanned, group_mode='project'):
     db.setdefault('catalogs', {})[group_mode] = scanned
 
 
+def diff_catalogs(previous, current):
+    """İki katalog arasındaki eklenen, değişen ve silinen kayıtları bul."""
+    previous = normalize_catalog(previous or {})
+    current = normalize_catalog(current or {})
+    updated_ids = set()
+    for model_id in set(previous) | set(current):
+        if previous.get(model_id) != current.get(model_id):
+            updated_ids.add(model_id)
+    return updated_ids
+
+
 def refresh_all_catalogs_unlocked(db):
     """Tüm görünüm modları için katalogları yeniden üret."""
     snapshot = scan_model_snapshot()
@@ -692,37 +966,15 @@ def refresh_incremental_catalogs_unlocked(db):
             for group_mode in GROUP_MODES
         }
 
-    changes = scan_incremental_changes(db.get('last_scan'))
+    snapshot = scan_model_snapshot()
     updated_ids = {group_mode: set() for group_mode in GROUP_MODES}
 
     for group_mode in GROUP_MODES:
-        merged_catalog = normalize_catalog(get_catalog_for_mode(db, group_mode) or {})
-
-        for _, entry in changes['root_files'].items():
-            record = build_root_catalog_record(entry, group_mode=group_mode)
-            if merged_catalog.get(record['id']) != record:
-                updated_ids[group_mode].add(record['id'])
-            merged_catalog[record['id']] = record
-
-        for group_path in sorted(changes['groups'][group_mode]):
-            file_entries = collect_supported_files(
-                MODELS_DIR / group_path,
-                recursive=(group_mode == 'project'),
-            )
-            record = build_group_catalog_record(
-                group_path,
-                Path(group_path).name,
-                file_entries,
-                group_mode=group_mode,
-            )
-            if record is None:
-                continue
-            if merged_catalog.get(record['id']) != record:
-                updated_ids[group_mode].add(record['id'])
-            merged_catalog[record['id']] = record
-
-        set_catalog_for_mode(db, merged_catalog, group_mode=group_mode)
-        sync_db_with_scan(db, merged_catalog, group_mode=group_mode)
+        previous_catalog = normalize_catalog(get_catalog_for_mode(db, group_mode) or {})
+        scanned = normalize_catalog(build_catalog_from_snapshot(snapshot, group_mode=group_mode))
+        updated_ids[group_mode] = diff_catalogs(previous_catalog, scanned)
+        set_catalog_for_mode(db, scanned, group_mode=group_mode)
+        sync_db_with_scan(db, scanned, group_mode=group_mode)
 
     db['last_scan'] = time.time()
     return 'incremental', updated_ids
@@ -750,6 +1002,7 @@ def run_scan(scan_mode='incremental', group_mode='folder'):
         return scanned, {
             'mode': actual_mode,
             'updated': len(updated_ids.get(group_mode, set())),
+            'updated_ids': sorted(updated_ids.get(group_mode, set())),
             'total': len(scanned),
         }
 
@@ -921,6 +1174,11 @@ def api_models():
     fmt_filter = request.args.get('format', '').strip().lower()
     sort_by = request.args.get('sort', 'name')  # name, size, date
     fav_only = request.args.get('fav', '').strip() == '1'
+    has_readme = request.args.get('has_readme', '').strip() == '1'
+    has_license = request.args.get('has_license', '').strip() == '1'
+    has_cad = request.args.get('has_cad', '').strip() == '1'
+    has_gcode = request.args.get('has_gcode', '').strip() == '1'
+    multipart_only = request.args.get('multipart', '').strip() == '1'
 
     results = []
     for mid, mdata in scanned.items():
@@ -928,20 +1186,46 @@ def api_models():
         user_data = db['models'][mid]
 
         item = {**mdata, **user_data, 'id': mid}
+        available_formats = item.get('available_formats') or ([item.get('format')] if item.get('format') else [])
 
         # Filtreler
-        if q and q not in item['name'].lower() and q not in item.get('display_name', '').lower():
-            # Etiketlerde de ara
-            if not any(q in t.lower() for t in item.get('tags', [])):
+        if q:
+            searchable_parts = [
+                item.get('name', ''),
+                item.get('display_name', ''),
+                item.get('readme_excerpt', ''),
+                ' '.join(available_formats),
+            ]
+            has_query_match = any(q in str(part).lower() for part in searchable_parts if part)
+            if not has_query_match:
+                has_query_match = any(q in t.lower() for t in item.get('tags', []))
+            if not has_query_match:
+                has_query_match = any(q in Path(path).name.lower() for path in item.get('all_files', []))
+            if not has_query_match:
                 continue
 
         if tag_filter and tag_filter not in item.get('tags', []):
             continue
 
-        if fmt_filter and item.get('format') != fmt_filter:
+        if fmt_filter and fmt_filter not in available_formats:
             continue
 
         if fav_only and not item.get('favorite'):
+            continue
+
+        if has_readme and not item.get('has_readme'):
+            continue
+
+        if has_license and not item.get('has_license'):
+            continue
+
+        if has_cad and not item.get('has_cad'):
+            continue
+
+        if has_gcode and not item.get('has_gcode'):
+            continue
+
+        if multipart_only and coerce_int(item.get('file_count'), default=0) <= 1:
             continue
 
         results.append(item)
@@ -1040,24 +1324,33 @@ def api_stats():
     printed = sum(1 for mid in scanned if db['models'][mid].get('printed'))
     formats = {}
     total_size = 0
+    with_readme = 0
+    with_cad = 0
+    with_gcode = 0
     for m in scanned.values():
-        fmt = m.get('format', 'unknown')
-        formats[fmt] = formats.get(fmt, 0) + 1
+        for fmt in m.get('available_formats', []) or [m.get('format', 'unknown')]:
+            formats[fmt] = formats.get(fmt, 0) + 1
         total_size += m.get('size', 0)
+        with_readme += int(bool(m.get('has_readme')))
+        with_cad += int(bool(m.get('has_cad')))
+        with_gcode += int(bool(m.get('has_gcode')))
 
     return jsonify({
         'total': total,
         'favorites': favorites,
         'printed': printed,
         'formats': formats,
+        'with_readme': with_readme,
+        'with_cad': with_cad,
+        'with_gcode': with_gcode,
         'total_size': format_size(total_size),
     })
 
 
 @app.route('/api/file/<path:filepath>')
 def api_serve_file(filepath):
-    """3D model dosyasını serve et."""
-    full_path = resolve_model_file_path(filepath)
+    """Katalogdaki izinli dosyaları serve et."""
+    full_path = resolve_catalog_file_path(filepath)
     as_attachment = request.args.get('download', '').strip() == '1'
     return send_file(
         str(full_path),
@@ -1069,7 +1362,7 @@ def api_serve_file(filepath):
 @app.route('/api/preview/<path:filepath>')
 def api_preview_file(filepath):
     """Destekleniyorsa model dosyası için gömülü önizleme döndür."""
-    full_path = resolve_model_file_path(filepath)
+    full_path = resolve_catalog_file_path(filepath)
     if full_path.suffix.lower() != '.3mf':
         abort(404)
 

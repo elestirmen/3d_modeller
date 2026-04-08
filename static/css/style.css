@@ -1,7 +1,5 @@
 /* ─── 3D Model Yöneticisi — Light Theme Design System ───── */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
 :root {
     /* Renkler — Açık Tema */
     --bg-primary: #f0f2f8;
@@ -25,7 +23,7 @@
     --favorite: #f59e0b;
 
     /* Tipografi */
-    --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font: 'Segoe UI Variable Text', 'Segoe UI', 'Helvetica Neue', 'Trebuchet MS', sans-serif;
 
     /* Boyutlar */
     --header-h: 64px;
@@ -739,6 +737,23 @@ a:hover {
     margin-bottom: 8px;
 }
 
+.card-supports {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.card-support-tag {
+    font-size: 0.68rem;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(26, 29, 46, 0.05);
+    color: var(--text-secondary);
+    border: 1px solid rgba(26, 29, 46, 0.08);
+    font-weight: 600;
+}
+
 .card-tags {
     display: flex;
     flex-wrap: wrap;
@@ -1020,6 +1035,104 @@ a:hover {
     font-weight: 600;
 }
 
+.maker-badges,
+.resource-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.detail-badge {
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--accent-light);
+    color: var(--accent);
+    font-size: 0.72rem;
+    font-weight: 700;
+    border: 1px solid rgba(91, 95, 247, 0.14);
+}
+
+.maker-profile {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.profile-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: var(--bg-primary);
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.profile-item strong {
+    color: var(--text-primary);
+    text-align: right;
+}
+
+.readme-excerpt {
+    margin-top: 12px;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    line-height: 1.55;
+}
+
+.resource-links {
+    margin-top: 12px;
+}
+
+.resource-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 7px 12px;
+    border-radius: 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-decoration: none;
+}
+
+.resource-link:hover {
+    background: var(--accent-light);
+    border-color: var(--border-hover);
+    text-decoration: none;
+}
+
+.preview-gallery {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.preview-thumb {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    padding: 0;
+    background: var(--bg-primary);
+    cursor: pointer;
+    box-shadow: var(--shadow-sm);
+}
+
+.preview-thumb img {
+    display: block;
+    width: 100%;
+    height: 88px;
+    object-fit: cover;
+}
+
+.empty-note {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
 /* Tag Editor */
 .tag-editor {
     display: flex;
@@ -1216,9 +1329,25 @@ button.btn-sm:hover {
 
 .file-format {
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     font-size: 0.68rem;
     font-weight: 700;
     color: var(--text-muted);
+}
+
+.file-role {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(26, 29, 46, 0.06);
+    color: var(--text-secondary);
+    font-size: 0.62rem;
+    letter-spacing: 0.4px;
 }
 
 .file-item.active .file-format {

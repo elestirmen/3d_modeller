@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>3D Model Yöneticisi</title>
     <meta name="description" content="3D model dosyalarınızı düzenleyin, etiketleyin ve önizleyin.">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
@@ -121,6 +119,17 @@
             </div>
 
             <div class="sidebar-section">
+                <h3 class="sidebar-title">Maker</h3>
+                <div class="format-chips" id="makerChips">
+                    <button class="chip" data-flag="has_readme">README</button>
+                    <button class="chip" data-flag="has_license">Lisans</button>
+                    <button class="chip" data-flag="has_cad">CAD</button>
+                    <button class="chip" data-flag="has_gcode">G-code</button>
+                    <button class="chip" data-flag="multipart">Çok Parça</button>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
                 <h3 class="sidebar-title">Etiketler</h3>
                 <div class="tag-list" id="tagList">
                     <!-- JS ile doldurulacak -->
@@ -190,6 +199,10 @@
                             <span class="detail-value" id="detailFormat">—</span>
                         </div>
                         <div class="detail-row">
+                            <span class="detail-label">Tüm Formatlar</span>
+                            <span class="detail-value" id="detailFormats">—</span>
+                        </div>
+                        <div class="detail-row">
                             <span class="detail-label">Boyut</span>
                             <span class="detail-value" id="detailSize">—</span>
                         </div>
@@ -204,6 +217,10 @@
                         <div class="detail-row">
                             <span class="detail-label">Durum</span>
                             <span class="detail-value" id="detailPrinted">Bekliyor</span>
+                        </div>
+                        <div class="detail-row">
+                            <span class="detail-label">Yan Dosya</span>
+                            <span class="detail-value" id="detailAssets">—</span>
                         </div>
                     </div>
                     <div class="detail-section">
@@ -223,8 +240,19 @@
                         <textarea class="note-input" id="noteInput" placeholder="Bu model hakkında not ekleyin..." rows="3"></textarea>
                         <button class="btn-primary btn-sm" id="saveNoteBtn">Notu Kaydet</button>
                     </div>
+                    <div class="detail-section" id="makerInfoSection">
+                        <h4>Maker Bilgisi</h4>
+                        <div class="maker-badges" id="makerBadges"></div>
+                        <div class="maker-profile" id="printProfile"></div>
+                        <p class="readme-excerpt" id="readmeExcerpt"></p>
+                        <div class="resource-links" id="resourceLinks"></div>
+                    </div>
+                    <div class="detail-section" id="previewGallerySection">
+                        <h4>Referans Görselleri</h4>
+                        <div class="preview-gallery" id="previewGallery"></div>
+                    </div>
                     <div class="detail-section" id="fileListSection">
-                        <h4>Dosyalar</h4>
+                        <h4>Dosyalar ve Varlıklar</h4>
                         <ul class="file-list" id="fileList"></ul>
                     </div>
                 </div>
@@ -235,12 +263,11 @@
     <!-- ─── Toast ───────────────────────────────────────────── -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <!-- Three.js CDN -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/fflate.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/3MFLoader.js"></script>
+    <script src="/static/vendor/three/three.min.js"></script>
+    <script src="/static/vendor/three/examples/js/controls/OrbitControls.js"></script>
+    <script src="/static/vendor/three/examples/js/libs/fflate.min.js"></script>
+    <script src="/static/vendor/three/examples/js/loaders/STLLoader.js"></script>
+    <script src="/static/vendor/three/examples/js/loaders/3MFLoader.js"></script>
     <script src="/static/js/app.js"></script>
 </body>
 </html>
