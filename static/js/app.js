@@ -10,6 +10,7 @@ const state = {
     currentTag: '',
     currentFormat: '',
     currentSort: 'name',
+    currentSortDir: localStorage.getItem('sortDir') === 'desc' ? 'desc' : 'asc',
     currentGroupMode: localStorage.getItem('groupMode') === 'project' ? 'project' : 'folder',
     currentMakerFilters: {
         has_readme: false,
@@ -48,8 +49,11 @@ const dom = {
     modelGrid: $('#modelGrid'),
     loadingOverlay: $('#loadingOverlay'),
     resultCount: $('#resultCount'),
-    sortSelect: $('#sortSelect'),
-    groupSelect: $('#groupSelect'),
+    sortGroup: $('#sortGroup'),
+    sortDirBtn: $('#sortDirBtn'),
+    groupGroup: $('#groupGroup'),
+    tagSearchInput: $('#tagSearchInput'),
+    btnTheme: $('#btnTheme'),
     sidebar: $('#sidebar'),
     sidebarClose: $('#sidebarClose'),
     sidebarBackdrop: $('#sidebarBackdrop'),
@@ -116,15 +120,62 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     } catch (e) { /* pass */ }
 
-    if (dom.groupSelect) {
-        dom.groupSelect.value = state.currentGroupMode;
-    }
+    initTheme();
+    syncSortGroupUI();
+    syncGroupGroupUI();
+    syncSortDirUI();
 
     loadModels();
     loadStats();
     loadTags();
     bindEvents();
 });
+
+function initTheme() {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'dark') applyTheme('dark');
+}
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    const isDark = theme === 'dark';
+    const sunIcon = dom.btnTheme?.querySelector('.icon-sun');
+    const moonIcon = dom.btnTheme?.querySelector('.icon-moon');
+    if (sunIcon) sunIcon.style.display = isDark ? 'none' : '';
+    if (moonIcon) moonIcon.style.display = isDark ? '' : 'none';
+    if (state.scene) {
+        state.scene.background = new THREE.Color(isDark ? 0x12141f : 0xeceef6);
+    }
+}
+
+function toggleTheme() {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const next = isDark ? 'light' : 'dark';
+    localStorage.setItem('theme', next);
+    applyTheme(next);
+}
+
+function syncSortGroupUI() {
+    if (!dom.sortGroup) return;
+    dom.sortGroup.querySelectorAll('.toggle-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.sort === state.currentSort);
+    });
+}
+
+function syncGroupGroupUI() {
+    if (!dom.groupGroup) return;
+    dom.groupGroup.querySelectorAll('.toggle-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.group === state.currentGroupMode);
+    });
+}
+
+function syncSortDirUI() {
+    if (!dom.sortDirBtn) return;
+    const isDesc = state.currentSortDir === 'desc';
+    dom.sortDirBtn.querySelector('.icon-asc').style.display = isDesc ? 'none' : '';
+    dom.sortDirBtn.querySelector('.icon-desc').style.display = isDesc ? '' : 'none';
+    dom.sortDirBtn.title = isDesc ? 'Z→A / Büyükten küçüğe' : 'A→Z / Küçükten büyüğe';
+}
 
 // ─── API Helpers ───────────────────────────────────────────
 async function api(url, options = {}) {
@@ -446,7 +497,7 @@ async function loadModels() {
         params.set('group', state.currentGroupMode);
 
         const data = await api(`/api/models?${params}`);
-        state.models = data.models;
+        state.models = state.currentSortDir === 'desc' ? [...data.models].reverse() : data.models;
         renderGrid();
         renderResultCount(data.total);
     } catch (err) {
@@ -545,6 +596,15 @@ function renderTags(tags) {
             <span class="tag-count">${t.count}</span>
         </div>
     `).join('');
+    filterTagList(dom.tagSearchInput?.value || '');
+}
+
+function filterTagList(query) {
+    const q = query.trim().toLowerCase();
+    dom.tagList.querySelectorAll('.tag-item').forEach(item => {
+        const name = (item.dataset.tag || '').toLowerCase();
+        item.style.display = !q || name.includes(q) ? '' : 'none';
+    });
 }
 
 function getFormatIcon(format) {
@@ -848,11 +908,12 @@ function bindEvents() {
         }, 300);
     });
 
-    // Ctrl+K ile arama
+    // Klavye kısayolları ve navigasyon
     document.addEventListener('keydown', (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
             e.preventDefault();
             dom.searchInput.focus();
+            return;
         }
         if (e.key === 'Escape' && dom.previewModal.classList.contains('visible')) {
             closePreview();
@@ -860,24 +921,72 @@ function bindEvents() {
         }
         if (e.key === 'Escape' && dom.sidebar.classList.contains('mobile-open')) {
             setSidebarOpen(false);
+            return;
+        }
+        // Model grid ok tuşu navigasyonu
+        if (['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
+            const focused = document.activeElement;
+            if (!focused?.classList.contains('model-card')) return;
+            e.preventDefault();
+            const cards = [...dom.modelGrid.querySelectorAll('.model-card')];
+            const idx = cards.indexOf(focused);
+            if (idx === -1) return;
+            const cols = Math.round(dom.modelGrid.clientWidth / (focused.offsetWidth + 16)) || 1;
+            const delta = (e.key === 'ArrowRight') ? 1
+                : (e.key === 'ArrowLeft') ? -1
+                : (e.key === 'ArrowDown') ? cols
+                : -cols;
+            const next = cards[idx + delta];
+            if (next) next.focus();
         }
     });
 
-    // Sıralama
-    dom.sortSelect.addEventListener('change', () => {
-        state.currentSort = dom.sortSelect.value;
+    // Kart klavye ile açma (Enter)
+    dom.modelGrid.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const card = e.target.closest('.model-card');
+            if (card) openPreview(card.dataset.id);
+        }
+    });
+
+    // Dark mod toggle
+    dom.btnTheme?.addEventListener('click', toggleTheme);
+
+    // Sıralama toggle grubu
+    dom.sortGroup?.addEventListener('click', (e) => {
+        const btn = e.target.closest('.toggle-btn');
+        if (!btn) return;
+        state.currentSort = btn.dataset.sort;
+        syncSortGroupUI();
         loadModels();
         if (isMobileViewport()) setSidebarOpen(false);
     });
 
-    dom.groupSelect?.addEventListener('change', async () => {
-        state.currentGroupMode = dom.groupSelect.value === 'folder' ? 'folder' : 'project';
+    // Sıralama yönü
+    dom.sortDirBtn?.addEventListener('click', () => {
+        state.currentSortDir = state.currentSortDir === 'asc' ? 'desc' : 'asc';
+        localStorage.setItem('sortDir', state.currentSortDir);
+        syncSortDirUI();
+        loadModels();
+    });
+
+    // Gruplama toggle grubu
+    dom.groupGroup?.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.toggle-btn');
+        if (!btn) return;
+        state.currentGroupMode = btn.dataset.group;
         localStorage.setItem('groupMode', state.currentGroupMode);
+        syncGroupGroupUI();
         closePreview();
         await loadModels();
         loadStats();
         loadTags();
         if (isMobileViewport()) setSidebarOpen(false);
+    });
+
+    // Etiket arama
+    dom.tagSearchInput?.addEventListener('input', () => {
+        filterTagList(dom.tagSearchInput.value);
     });
 
     // Format filtreleri
@@ -1573,7 +1682,7 @@ function renderGrid() {
         const assetLabel = m.asset_count ? `<span class="card-support-tag">+${m.asset_count} ek</span>` : '';
 
         return `
-            <div class="model-card" data-id="${m.id}">
+            <div class="model-card" data-id="${m.id}" tabindex="0" role="button" aria-label="${displayName}">
                 <div class="card-thumbnail" data-thumb-id="${m.id}" data-format="${thumbFormat}" data-thumb-kind="${thumbState.kind}">
                     <span class="format-badge">${escapeHtml((m.main_file_format || m.format || '').toUpperCase())}</span>
                     ${fileCount}

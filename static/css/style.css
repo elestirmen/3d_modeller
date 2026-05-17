@@ -39,6 +39,50 @@
     --shadow-glow: 0 4px 20px var(--accent-glow);
 }
 
+/* ─── Dark Theme ────────────────────────────────────────── */
+
+[data-theme="dark"] {
+    --bg-primary: #12141f;
+    --bg-secondary: #1c1f30;
+    --bg-card: rgba(28, 31, 48, 0.9);
+    --bg-card-hover: rgba(35, 39, 60, 1);
+    --bg-glass: rgba(18, 20, 32, 0.92);
+    --bg-modal: rgba(10, 12, 22, 0.97);
+    --border: rgba(255, 255, 255, 0.08);
+    --border-hover: rgba(100, 110, 255, 0.5);
+    --text-primary: #e2e5f5;
+    --text-secondary: #8a92b8;
+    --text-muted: #4e5470;
+    --accent-light: rgba(91, 95, 247, 0.2);
+    --accent-glow: rgba(91, 95, 247, 0.3);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.2);
+    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="dark"] body {
+    background-image:
+        radial-gradient(ellipse at 15% 30%, rgba(91, 95, 247, 0.07) 0%, transparent 55%),
+        radial-gradient(ellipse at 85% 70%, rgba(168, 85, 247, 0.05) 0%, transparent 50%);
+}
+
+[data-theme="dark"] .card-thumbnail {
+    background: radial-gradient(ellipse at 50% 40%, #1e2240 0%, #151828 45%, #0f1020 100%);
+}
+
+[data-theme="dark"] .viewer-container {
+    background: linear-gradient(145deg, #141628 0%, #0f1020 100%);
+}
+
+[data-theme="dark"] .sort-dir-btn:hover,
+[data-theme="dark"] .sort-dir-btn {
+    color: var(--text-secondary);
+}
+
+[data-theme="dark"] .tag-count {
+    background: var(--bg-secondary);
+}
+
 /* ─── Reset & Base ──────────────────────────────────────── */
 
 *,
@@ -78,6 +122,12 @@ a:hover {
 ::selection {
     background: var(--accent);
     color: white;
+}
+
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
 }
 
 ::-webkit-scrollbar {
@@ -310,10 +360,17 @@ a:hover {
 
 .btn-rescan-secondary {
     color: var(--text-muted);
+    font-weight: 500;
+    background: transparent;
+    box-shadow: none;
+    border-style: dashed;
 }
 
 .btn-rescan-secondary:hover {
-    color: var(--text-primary);
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border-style: solid;
+    box-shadow: var(--shadow-sm);
 }
 
 /* ─── Main Layout ─────────────────────────────────────── */
@@ -428,27 +485,110 @@ a:hover {
     font-weight: 600;
 }
 
-.sort-select {
+.sidebar-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.sort-dir-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    background: transparent;
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-xs);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.sort-dir-btn svg {
+    width: 13px;
+    height: 13px;
+}
+
+.sort-dir-btn:hover {
+    background: var(--accent-light);
+    border-color: var(--border-hover);
+    color: var(--accent);
+}
+
+.toggle-group {
+    display: flex;
+    gap: 3px;
+    background: var(--bg-primary);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 3px;
+}
+
+.toggle-btn {
+    flex: 1;
+    padding: 6px 8px;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-family: var(--font);
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.toggle-btn:hover {
+    background: var(--accent-light);
+    color: var(--accent);
+}
+
+.toggle-btn.active {
+    background: var(--accent);
+    color: white;
+    font-weight: 600;
+    box-shadow: 0 1px 4px rgba(91, 95, 247, 0.35);
+}
+
+/* ─── Tag Search ──────────────────────────────────────── */
+
+.tag-search-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.tag-search-icon {
+    position: absolute;
+    left: 9px;
+    width: 13px;
+    height: 13px;
+    color: var(--text-muted);
+    pointer-events: none;
+}
+
+.tag-search-input {
     width: 100%;
-    padding: 9px 12px;
+    padding: 6px 10px 6px 28px;
     background: var(--bg-secondary);
     border: 1.5px solid var(--border);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font-family: var(--font);
-    font-size: 0.85rem;
-    cursor: pointer;
+    font-size: 0.8rem;
     outline: none;
-    appearance: none;
-    box-shadow: var(--shadow-sm);
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239298b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 12px center;
+    transition: border-color 0.2s;
 }
 
-.sort-select option {
-    background: var(--bg-secondary);
-    color: var(--text-primary);
+.tag-search-input::placeholder {
+    color: var(--text-muted);
+}
+
+.tag-search-input:focus {
+    border-color: var(--accent);
 }
 
 .format-chips {
@@ -588,11 +728,17 @@ a:hover {
     box-shadow: var(--shadow-sm);
 }
 
-.model-card:hover {
+.model-card:hover,
+.model-card:focus-visible {
     background: var(--bg-card-hover);
     border-color: var(--border-hover);
     transform: translateY(-4px);
     box-shadow: var(--shadow-md), var(--shadow-glow);
+    outline: none;
+}
+
+.model-card:focus-visible {
+    box-shadow: var(--shadow-md), 0 0 0 3px var(--accent-glow);
 }
 
 .card-thumbnail {
@@ -745,13 +891,19 @@ a:hover {
 }
 
 .card-support-tag {
-    font-size: 0.68rem;
-    padding: 2px 8px;
+    font-size: 0.67rem;
+    padding: 2px 7px;
     border-radius: 999px;
-    background: rgba(26, 29, 46, 0.05);
-    color: var(--text-secondary);
-    border: 1px solid rgba(26, 29, 46, 0.08);
+    background: rgba(16, 185, 129, 0.08);
+    color: #0d7a4e;
+    border: 1px solid rgba(16, 185, 129, 0.18);
     font-weight: 600;
+}
+
+[data-theme="dark"] .card-support-tag {
+    background: rgba(16, 185, 129, 0.12);
+    color: #34d399;
+    border-color: rgba(16, 185, 129, 0.22);
 }
 
 .card-tags {
@@ -871,9 +1023,9 @@ a:hover {
 .modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(240, 242, 248, 0.92);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: rgba(26, 29, 46, 0.55);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     z-index: 200;
     display: flex;
     align-items: center;
@@ -881,6 +1033,10 @@ a:hover {
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.3s ease;
+}
+
+[data-theme="dark"] .modal-overlay {
+    background: rgba(5, 6, 15, 0.75);
 }
 
 .modal-overlay.visible {
@@ -931,6 +1087,65 @@ a:hover {
 .modal-actions {
     display: flex;
     gap: 8px;
+    align-items: center;
+}
+
+.btn-modal-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 12px;
+    background: var(--bg-secondary);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-family: var(--font);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: var(--shadow-sm);
+    white-space: nowrap;
+}
+
+.btn-modal-action svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+
+.btn-modal-action:hover {
+    background: var(--accent-light);
+    border-color: var(--border-hover);
+    color: var(--accent);
+}
+
+.btn-modal-action.active {
+    background: var(--accent-light);
+    border-color: rgba(91, 95, 247, 0.4);
+    color: var(--accent);
+}
+
+#modalPrinted.active {
+    background: rgba(22, 163, 74, 0.1);
+    border-color: rgba(22, 163, 74, 0.35);
+    color: var(--success);
+}
+
+#modalPrinted.active svg {
+    stroke: var(--success);
+}
+
+#modalFavorite.active svg {
+    fill: var(--favorite);
+    stroke: var(--favorite);
+}
+
+#modalFavorite.active {
+    background: rgba(245, 158, 11, 0.1);
+    border-color: rgba(245, 158, 11, 0.35);
+    color: var(--favorite);
 }
 
 .modal-body {
