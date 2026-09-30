@@ -18,8 +18,12 @@ function loginFormHtml() {
   return `
     <form class="login-form" novalidate>
       <div class="login-lock">${icon('lock', 'icon-lg')}</div>
-      <h2>Yönetici girişi</h2>
-      <p>Yükleme, düzenleme ve paylaşım için şifreni gir.</p>
+      <h2>Giriş yap</h2>
+      <p>Kullanıcı adın ve şifrenle giriş yap.</p>
+      <div class="input-group" style="margin-bottom:10px">
+        ${icon('user-round')}
+        <input class="input" type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Kullanıcı adı" required aria-label="Kullanıcı adı">
+      </div>
       <div class="input-group">
         ${icon('key-round')}
         <input class="input" type="password" name="password" autocomplete="current-password" placeholder="Şifre" required aria-label="Şifre">
@@ -33,6 +37,8 @@ function loginFormHtml() {
 
 function bindLoginForm(form, onSuccess) {
   const input = form.querySelector('input[name="password"]');
+  const userInput = form.querySelector('input[name="username"]');
+  try { userInput.value = localStorage.getItem('lastUsername') || ''; } catch { /* yoksay */ }
   const error = form.querySelector('[data-error]');
   const caps = form.querySelector('[data-caps]');
   const submit = form.querySelector('button[type="submit"]');
@@ -47,6 +53,11 @@ function bindLoginForm(form, onSuccess) {
   });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (!userInput.value.trim()) {
+      error.textContent = 'Kullanıcı adını gir.';
+      userInput.focus();
+      return;
+    }
     if (!input.value) {
       error.textContent = 'Şifreni gir.';
       input.focus();
@@ -56,9 +67,11 @@ function bindLoginForm(form, onSuccess) {
     submit.innerHTML = '<span class="spinner"></span>Kontrol ediliyor…';
     error.textContent = '';
     try {
-      const result = await api('/api/auth/login', { method: 'POST', body: { password: input.value } });
+      const username = userInput.value.trim().toLowerCase();
+      const result = await api('/api/auth/login', { method: 'POST', body: { username, password: input.value } });
       setCsrf(result.csrf);
-      onSuccess?.();
+      try { localStorage.setItem('lastUsername', username); } catch { /* yoksay */ }
+      onSuccess?.(result);
     } catch (err) {
       error.textContent = err.message;
       input.select();
@@ -66,7 +79,7 @@ function bindLoginForm(form, onSuccess) {
       submit.innerHTML = `${icon('log-in')}Giriş yap`;
     }
   });
-  setTimeout(() => input.focus(), 60);
+  setTimeout(() => (userInput.value ? input : userInput).focus(), 60);
 }
 
 export function openLogin({ onSuccess } = {}) {
@@ -80,9 +93,9 @@ export function openLogin({ onSuccess } = {}) {
   close.innerHTML = icon('x');
   $('.modal-card', dialog).style.position = 'relative';
   $('.modal-card', dialog).prepend(close);
-  bindLoginForm($('form', dialog), () => {
+  bindLoginForm($('form', dialog), (result) => {
     dialog.close();
-    onSuccess?.();
+    onSuccess?.(result);
   });
   return dialog;
 }
@@ -292,7 +305,7 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
             <input class="input" id="up-source" name="source_url" type="url" maxlength="500" placeholder="https://www.printables.com/model/...">
           </div>
           <div style="margin-top:8px">
-            ${switchHtml('hidden', 'Ziyaretçilerden gizle', 'Yalnızca sen ve paylaşım bağlantısı olanlar görür', false)}
+            ${switchHtml('hidden', 'Ziyaretçilerden gizle', boot.newModelsHidden ? 'Yeni modeller varsayılan olarak gizli (Ayarlar → Gizlilik)' : 'Yalnızca sen ve paylaşım bağlantısı olanlar görür', Boolean(boot.newModelsHidden))}
             ${switchHtml('nsfw', '18+ içerik', 'Ayarlarına göre ziyaretçilerden gizlenir', false)}
           </div>
         </form>`}
@@ -822,7 +835,7 @@ export function openShare(model, { admin = false, onChange } = {}) {
 
 export function openSettings({ onChanged, initialTab = 'general' } = {}) {
   const tabs = [
-    ['general', 'Genel'], ['privacy', 'Gizlilik'], ['maintenance', 'Bakım'], ['shares', 'Paylaşımlar'], ['security', 'Güvenlik'],
+    ['general', 'Genel'], ['privacy', 'Gizlilik'], ['users', 'Kullanıcılar'], ['maintenance', 'Bakım'], ['shares', 'Paylaşımlar'], ['security', 'Şifrem'],
   ];
   const dialog = createModal({
     title: 'Ayarlar',
@@ -844,6 +857,7 @@ export function openSettings({ onChanged, initialTab = 'general' } = {}) {
   const save = async (changes) => {
     try {
       settings = await api('/api/settings', { method: 'PATCH', body: changes });
+      boot.newModelsHidden = settings.new_models_hidden;
       toast('Ayarlar kaydedildi', 'success', { duration: 1600 });
       onChanged?.(settings);
     } catch (error) {
@@ -872,8 +886,37 @@ export function openSettings({ onChanged, initialTab = 'general' } = {}) {
         ${switchHtml('public_browsing', 'Arşiv herkese açık', 'Kapalıyken ziyaretçiler giriş ekranı görür; paylaşım bağlantıları çalışmaya devam eder', settings.public_browsing)}
         ${switchHtml('public_downloads', 'Ziyaretçiler dosya indirebilsin', 'Kapalıyken indirme düğmeleri ve ek dosyalar (CAD, PDF, ZIP) ziyaretçilere kapanır; 3D önizleme için model verisi yine tarayıcıya aktarılır.', settings.public_downloads)}
         ${switchHtml('hide_nsfw', '18+ içeriği ziyaretçilerden gizle', 'Otomatik algılanan veya elle işaretlenen modeller', settings.hide_nsfw)}
+        ${switchHtml('new_models_hidden', 'Yeni modeller varsayılan olarak gizli', 'Yüklediğin veya klasöre eklenen modeller, sen yayınlayana kadar ziyaretçilere görünmez', settings.new_models_hidden)}
+        <div class="section">
+          <h3 class="section-title">Toplu görünürlük</h3>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button type="button" class="btn" data-bulk="hide">${icon('eye-off')}Tüm modelleri gizle</button>
+            <button type="button" class="btn" data-bulk="show">${icon('globe')}Tüm modelleri yayınla</button>
+          </div>
+          <p class="field-hint" style="margin:8px 0 0">Tek tek yayınlamak için modelin detayındaki “Ziyaretçilerden gizle” anahtarını kullan.</p>
+        </div>
         <div class="notice is-warning" style="margin-top:14px">${icon('triangle-alert')}<div>Bazı modeller (ör. MakerWorld “Standart Dijital Dosya Lisansı”, NC/ND lisanslar) yeniden dağıtıma izin vermeyebilir. Bu modelleri gizleyebilir veya ziyaretçi indirmelerini kapatabilirsin.</div></div>`;
       panel.querySelectorAll('input[type="checkbox"]').forEach((input) => input.addEventListener('change', () => save({ [input.name]: input.checked })));
+      panel.querySelectorAll('[data-bulk]').forEach((button) => button.addEventListener('click', async () => {
+        const hide = button.dataset.bulk === 'hide';
+        const ok = await confirmDialog({
+          title: hide ? 'Tüm modeller gizlensin mi?' : 'Tüm modeller yayınlansın mı?',
+          message: hide
+            ? 'Ziyaretçiler hiçbir modeli göremez; paylaşım bağlantıları çalışmaya devam eder.'
+            : 'Gizli işaretli tüm modeller ziyaretçilere açılır (18+ ayarı ayrıca uygulanır).',
+          confirmText: hide ? 'Tümünü gizle' : 'Tümünü yayınla',
+          danger: !hide,
+          iconName: hide ? 'eye-off' : 'globe',
+        });
+        if (!ok) return;
+        try {
+          const result = await api('/api/admin/bulk', { method: 'POST', body: { ids: 'all', changes: { hidden: hide } } });
+          toast(`${result.updated} model ${hide ? 'gizlendi' : 'yayınlandı'}`, 'success');
+          onChanged?.(settings);
+        } catch (error) {
+          toast(error.message, 'error');
+        }
+      }));
     },
     async maintenance() {
       panel.innerHTML = '<div class="status-grid" data-status-grid></div><div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px"></div>';
@@ -940,37 +983,94 @@ export function openSettings({ onChanged, initialTab = 'general' } = {}) {
       }));
     },
     async security() {
+      renderPasswordForm(panel);
+    },
+    async users() {
+      const { users, roles } = await api('/api/users');
+      const me = boot.user?.username;
+      const roleOptions = (selected) => roles.map((role) => `<option value="${role.key}" ${role.key === selected ? 'selected' : ''}>${esc(role.label)}</option>`).join('');
       panel.innerHTML = `
-        <form data-password novalidate>
-          <div class="field">
-            <label class="field-label" for="pw-current">Mevcut şifre</label>
-            <input class="input" id="pw-current" type="password" autocomplete="current-password" required>
+        <div class="notice" style="margin-bottom:14px">${icon('info')}<div><strong>Yönetici</strong> her şeyi yapar. <strong>Editör</strong> model yükler, düzenler, görünürlüğü ve paylaşımları yönetir. <strong>Üye</strong> gizliler dahil tüm arşivi görür ve indirir (18+ hariç).</div></div>
+        ${users.map((user) => `
+          <div class="share-row" data-user="${esc(user.username)}">
+            <span class="admin-avatar" style="flex:none">${user.role === 'admin' ? icon('shield-check') : `<span class="avatar-initial">${esc(user.name.charAt(0).toLocaleUpperCase('tr'))}</span>`}</span>
+            <div class="share-row-meta">
+              <strong style="font-family:var(--font)">${esc(user.name)} <span style="color:var(--text-3);font-weight:500">@${esc(user.username)}</span>${user.username === me ? ' · sen' : ''}</strong>
+              ${user.disabled ? '<span class="badge badge-warning">Devre dışı</span> · ' : ''}${user.lastLogin ? `son giriş ${esc(formatRelative(user.lastLogin))}` : 'hiç giriş yapmadı'}
+            </div>
+            <select class="select" data-role style="width:auto;min-height:32px;height:32px;padding-top:0;padding-bottom:0;font-size:12.5px" aria-label="Rol" ${user.username === me ? 'disabled' : ''}>${roleOptions(user.role)}</select>
+            <button type="button" class="btn btn-ghost btn-icon btn-sm" data-reset title="Şifre belirle" aria-label="Şifre belirle">${icon('key-round', 'icon-sm')}</button>
+            ${user.username === me ? '' : `
+              <button type="button" class="btn btn-ghost btn-icon btn-sm" data-toggle-user title="${user.disabled ? 'Etkinleştir' : 'Devre dışı bırak'}" aria-label="${user.disabled ? 'Etkinleştir' : 'Devre dışı bırak'}">${icon(user.disabled ? 'circle-check' : 'circle-x', 'icon-sm')}</button>
+              <button type="button" class="btn btn-ghost btn-icon btn-sm" data-delete-user title="Sil" aria-label="Kullanıcıyı sil">${icon('trash-2', 'icon-sm')}</button>`}
+          </div>`).join('')}
+        <form class="section" data-new-user novalidate>
+          <h3 class="section-title">Yeni kullanıcı</h3>
+          <div class="field-row">
+            <div class="field"><label class="field-label" for="nu-username">Kullanıcı adı</label><input class="input" id="nu-username" name="username" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" placeholder="ornek.kullanici" required></div>
+            <div class="field"><label class="field-label" for="nu-name">Görünen ad</label><input class="input" id="nu-name" name="name" maxlength="60" placeholder="Örn. Ayşe"></div>
           </div>
           <div class="field-row" style="margin-top:14px">
-            <div class="field">
-              <label class="field-label" for="pw-new">Yeni şifre</label>
-              <input class="input" id="pw-new" type="password" autocomplete="new-password" minlength="8" required>
-            </div>
-            <div class="field">
-              <label class="field-label" for="pw-repeat">Yeni şifre (tekrar)</label>
-              <input class="input" id="pw-repeat" type="password" autocomplete="new-password" minlength="8" required>
-            </div>
+            <div class="field"><label class="field-label" for="nu-password">Şifre</label><input class="input" id="nu-password" name="password" type="password" autocomplete="new-password" minlength="8" required></div>
+            <div class="field"><label class="field-label" for="nu-role">Rol</label><select class="select" id="nu-role" name="role">${roleOptions('member')}</select></div>
           </div>
-          <p class="field-hint" style="margin:10px 0 0">En az 8 karakter. Şifre değişince diğer cihazlardaki oturumlar kapanır.</p>
           <div class="form-error" data-error></div>
-          <button type="submit" class="btn btn-primary">${icon('lock')}Şifreyi değiştir</button>
+          <button type="submit" class="btn btn-primary">${icon('plus')}Kullanıcı oluştur</button>
         </form>`;
-      $('[data-password]', panel).addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const error = $('[data-error]', panel);
-        const next = $('#pw-new', panel).value;
-        if (next.length < 8) { error.textContent = 'Yeni şifre en az 8 karakter olmalı.'; return; }
-        if (next !== $('#pw-repeat', panel).value) { error.textContent = 'Yeni şifreler eşleşmiyor.'; return; }
+      const refresh = () => views.users();
+      const update = async (username, changes, message) => {
         try {
-          await api('/api/auth/password', { method: 'POST', body: { current: $('#pw-current', panel).value, new: next } });
-          error.textContent = '';
-          event.target.reset();
-          toast('Şifre değiştirildi', 'success');
+          await api(`/api/users/${encodeURIComponent(username)}`, { method: 'PATCH', body: changes });
+          toast(message, 'success');
+        } catch (error) {
+          toast(error.message, 'error');
+        }
+        refresh();
+      };
+      panel.querySelectorAll('[data-user]').forEach((row) => {
+        const username = row.dataset.user;
+        row.querySelector('[data-role]')?.addEventListener('change', (event) => update(username, { role: event.target.value }, 'Rol güncellendi'));
+        row.querySelector('[data-toggle-user]')?.addEventListener('click', () => {
+          const user = users.find((item) => item.username === username);
+          update(username, { disabled: !user.disabled }, user.disabled ? 'Hesap etkinleştirildi' : 'Hesap devre dışı bırakıldı');
+        });
+        row.querySelector('[data-reset]')?.addEventListener('click', () => {
+          const box = createModal({
+            title: 'Şifre belirle',
+            description: `@${username} için yeni şifre (hesabın açık oturumları kapanır)`,
+            iconName: 'key-round',
+            body: '<div class="field"><label class="field-label" for="rp-password">Yeni şifre</label><input class="input" id="rp-password" type="password" autocomplete="new-password" minlength="8"></div><div class="form-error" data-error></div>',
+            footer: `<button type="button" class="btn btn-ghost" data-close>Vazgeç</button><button type="button" class="btn btn-primary" data-save>${icon('check')}Kaydet</button>`,
+          });
+          box.querySelector('[data-save]').addEventListener('click', async () => {
+            const value = box.querySelector('#rp-password').value;
+            if (value.length < 8) { box.querySelector('[data-error]').textContent = 'Şifre en az 8 karakter olmalı.'; return; }
+            box.close();
+            update(username, { password: value }, 'Şifre güncellendi');
+          });
+        });
+        row.querySelector('[data-delete-user]')?.addEventListener('click', async () => {
+          const ok = await confirmDialog({ title: 'Kullanıcı silinsin mi?', message: `@${username} hesabı kalıcı olarak silinecek.`, confirmText: 'Sil', danger: true, iconName: 'trash-2' });
+          if (!ok) return;
+          try {
+            await api(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+            toast('Kullanıcı silindi', 'success');
+          } catch (error) {
+            toast(error.message, 'error');
+          }
+          refresh();
+        });
+      });
+      panel.querySelector('[data-new-user]').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const data = Object.fromEntries(new FormData(form));
+        const error = form.querySelector('[data-error]');
+        if ((data.password || '').length < 8) { error.textContent = 'Şifre en az 8 karakter olmalı.'; return; }
+        try {
+          await api('/api/users', { method: 'POST', body: { ...data, username: data.username.trim().toLowerCase() } });
+          toast('Kullanıcı oluşturuldu', 'success');
+          refresh();
         } catch (err) {
           error.textContent = err.message;
         }
@@ -994,5 +1094,57 @@ export function openSettings({ onChanged, initialTab = 'general' } = {}) {
   });
   dialog.addEventListener('close', () => clearInterval(poll));
   show(initialTab);
+  return dialog;
+}
+
+// ─── Hesap ──────────────────────────────────────────────────────────
+
+function renderPasswordForm(panel) {
+  panel.innerHTML = `
+    <form data-password novalidate>
+      <div class="field">
+        <label class="field-label" for="pw-current">Mevcut şifre</label>
+        <input class="input" id="pw-current" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="field-row" style="margin-top:14px">
+        <div class="field">
+          <label class="field-label" for="pw-new">Yeni şifre</label>
+          <input class="input" id="pw-new" type="password" autocomplete="new-password" minlength="8" required>
+        </div>
+        <div class="field">
+          <label class="field-label" for="pw-repeat">Yeni şifre (tekrar)</label>
+          <input class="input" id="pw-repeat" type="password" autocomplete="new-password" minlength="8" required>
+        </div>
+      </div>
+      <p class="field-hint" style="margin:10px 0 0">En az 8 karakter. Şifre değişince diğer cihazlardaki oturumların kapanır.</p>
+      <div class="form-error" data-error></div>
+      <button type="submit" class="btn btn-primary">${icon('lock')}Şifreyi değiştir</button>
+    </form>`;
+  panel.querySelector('[data-password]').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const error = panel.querySelector('[data-error]');
+    const next = panel.querySelector('#pw-new').value;
+    if (next.length < 8) { error.textContent = 'Yeni şifre en az 8 karakter olmalı.'; return; }
+    if (next !== panel.querySelector('#pw-repeat').value) { error.textContent = 'Yeni şifreler eşleşmiyor.'; return; }
+    try {
+      await api('/api/auth/password', { method: 'POST', body: { current: panel.querySelector('#pw-current').value, new: next } });
+      error.textContent = '';
+      event.target.reset();
+      toast('Şifre değiştirildi', 'success');
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  });
+}
+
+export function openAccount() {
+  const user = boot.user || {};
+  const dialog = createModal({
+    title: 'Şifremi değiştir',
+    description: `${user.name || ''} · @${user.username || ''} · ${user.roleLabel || ''}`,
+    iconName: 'lock',
+    body: '<div data-panel></div>',
+  });
+  renderPasswordForm(dialog.querySelector('[data-panel]'));
   return dialog;
 }

@@ -561,6 +561,7 @@ button.cat-chip:hover { filter: brightness(1.08); }
   color: #fff;
 }
 .admin-avatar .icon { width: 15px; height: 15px; }
+.avatar-initial { font-size: 13px; font-weight: 700; line-height: 1; color: #fff; }
 
 /* Açılır menü */
 
@@ -835,7 +836,6 @@ button.cat-chip:hover { filter: brightness(1.08); }
   color: #fff;
   text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
 }
-.is-hidden-model .card-media { opacity: 0.72; }
 
 /* Liste görünümü */
 

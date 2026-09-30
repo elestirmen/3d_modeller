@@ -290,6 +290,15 @@ class AuthTests(ApiTestCase):
             response = self.post('/api/auth/login', {'password': self.password})
         self.assertEqual(response.status_code, 429)
 
+    def test_rate_limit_is_per_real_client_behind_cloudflare(self):
+        with patch('app.time.sleep'):
+            for _ in range(app.LOGIN_MAX_FAILURES):
+                self.client.post('/api/auth/login', json={'password': 'yanlis'},
+                                 headers={'X-CSRF-Token': self.csrf, 'CF-Connecting-IP': '203.0.113.7'})
+            other = self.client.post('/api/auth/login', json={'password': self.password},
+                                     headers={'X-CSRF-Token': self.csrf, 'CF-Connecting-IP': '198.51.100.9'})
+        self.assertEqual(other.status_code, 200)
+
     def test_admin_endpoints_reject_visitors(self):
         for method, url in (('POST', '/api/scan'), ('PATCH', f"/api/models/{self.model_id('Kutu')}"), ('POST', '/api/uploads'), ('GET', '/api/settings')):
             response = self.post(url, method=method) if method != 'GET' else self.client.get(url)
@@ -482,7 +491,7 @@ class ReviewRegressionTests(ApiTestCase):
         response = self.client.delete('/api/uploads/%2e%2e', headers={'X-CSRF-Token': self.csrf})
         self.assertIn(response.status_code, (200, 404))
         self.assertTrue((self.data / 'db.json').exists())
-        self.assertTrue((self.data / '.admin.json').exists())
+        self.assertTrue((self.data / '.users.json').exists())
 
     def test_non_ascii_csrf_header_is_rejected_cleanly(self):
         response = self.client.post('/api/auth/login', json={'password': 'x'}, headers={'X-CSRF-Token': 'ş'.encode('utf-8').decode('latin-1')})
@@ -522,6 +531,94 @@ class ReviewRegressionTests(ApiTestCase):
         self.assertEqual(self.library.db['models'][self.model_id('Kutu')]['note'], 'kalsın')
         self.library.save()
         self.assertIn('kalsın', (self.data / 'db.json').read_text(encoding='utf-8'))
+
+
+class VisibilityTests(ApiTestCase):
+    def test_new_models_hidden_setting_applies_only_to_new_models(self):
+        self.login()
+        self.post('/api/settings', {'new_models_hidden': True}, method='PATCH')
+        write_stl(self.models / 'Yeni Model' / 'yeni.stl')
+        self.library.scan()
+        visitor = self.flask_app.test_client()
+        titles = {model['title'] for model in visitor.get('/api/library').get_json()['models']}
+        self.assertEqual(titles, {'Kutu', 'Anahtarlık'})
+        self.assertTrue(self.library.db['models'][self.model_id('Yeni Model')]['hidden'])
+
+    def test_bulk_visibility_hides_everything_then_publishes_selection(self):
+        self.login()
+        self.assertEqual(self.post('/api/admin/bulk', {'ids': 'all', 'changes': {'hidden': True}}).get_json()['updated'], 2)
+        box = self.model_id('Kutu')
+        self.post('/api/admin/bulk', {'ids': [box, 'yok'], 'changes': {'hidden': False}})
+        visitor = self.flask_app.test_client()
+        self.assertEqual([model['id'] for model in visitor.get('/api/library').get_json()['models']], [box])
+        self.assertEqual(self.post('/api/admin/bulk', {'ids': 'all', 'changes': {'note': 'x'}}).status_code, 400)
+        anonymous = self.flask_app.test_client()
+        anon_csrf = self.fresh_csrf(anonymous)
+        self.assertEqual(self.post('/api/admin/bulk', {'ids': 'all', 'changes': {'hidden': False}}, client=anonymous, csrf=anon_csrf).status_code, 401)
+
+
+class UserRoleTests(ApiTestCase):
+    def make_user(self, username, role, password='Kullanici.1'):
+        self.login()
+        response = self.post('/api/users', {'username': username, 'password': password, 'role': role, 'name': username.title()})
+        self.assertEqual(response.status_code, 201, response.get_json())
+        client = self.flask_app.test_client()
+        csrf = self.fresh_csrf(client)
+        login = self.post('/api/auth/login', {'username': username, 'password': password}, client=client, csrf=csrf)
+        self.assertEqual(login.status_code, 200, login.get_json())
+        return client, login.get_json()['csrf']
+
+    def test_admin_logs_in_with_username_and_legacy_body(self):
+        response = self.post('/api/auth/login', {'username': 'admin', 'password': self.password})
+        self.assertEqual(response.get_json()['user']['role'], 'admin')
+        self.csrf = response.get_json()['csrf']
+        self.assertEqual(self.post('/api/auth/login', {'username': 'yok', 'password': self.password}).status_code, 401)
+
+    def test_member_sees_hidden_models_but_not_nsfw_and_cannot_edit(self):
+        self.login()
+        box = self.model_id('Kutu')
+        key = self.model_id('Anahtarlık.stl')
+        self.post(f'/api/models/{box}', {'hidden': True}, method='PATCH')
+        self.post(f'/api/models/{key}', {'nsfw': True}, method='PATCH')
+        member, csrf = self.make_user('uye', 'member')
+        ids = {model['id'] for model in member.get('/api/library').get_json()['models']}
+        self.assertIn(box, ids)
+        self.assertNotIn(key, ids)
+        self.assertEqual(member.get('/api/file/Kutu/box.stl?download=1').status_code, 200)
+        self.assertEqual(self.post(f'/api/models/{box}', {'title': 'x'}, client=member, csrf=csrf, method='PATCH').status_code, 403)
+        self.assertEqual(self.post('/api/uploads', {'files': []}, client=member, csrf=csrf).status_code, 403)
+        detail = member.get(f'/api/models/{box}').get_json()
+        self.assertNotIn('note', detail)
+
+    def test_editor_can_edit_and_share_but_not_delete_or_change_settings(self):
+        editor, csrf = self.make_user('editor', 'editor')
+        box = self.model_id('Kutu')
+        self.assertEqual(self.post(f'/api/models/{box}', {'category': 'decor'}, client=editor, csrf=csrf, method='PATCH').status_code, 200)
+        self.assertEqual(self.post(f'/api/models/{box}/shares', {}, client=editor, csrf=csrf).status_code, 201)
+        self.assertEqual(self.post(f'/api/models/{box}', client=editor, csrf=csrf, method='DELETE').status_code, 403)
+        self.assertEqual(self.post('/api/settings', {'public_browsing': False}, client=editor, csrf=csrf, method='PATCH').status_code, 403)
+        self.assertEqual(editor.get('/api/users').status_code, 403)
+
+    def test_member_can_browse_private_archive_and_change_own_password(self):
+        member, csrf = self.make_user('aile', 'member')
+        self.post('/api/settings', {'public_browsing': False}, method='PATCH')
+        self.assertEqual(member.get('/api/library').status_code, 200)
+        self.assertEqual(self.flask_app.test_client().get('/api/library').status_code, 401)
+        changed = self.post('/api/auth/password', {'current': 'Kullanici.1', 'new': 'Yepyeni.2'}, client=member, csrf=csrf)
+        self.assertEqual(changed.status_code, 200)
+        self.assertTrue(member.get('/api/session').get_json()['user'])
+        self.assertIsNotNone(self.library.check_login('aile', 'Yepyeni.2'))
+
+    def test_last_admin_is_protected_and_disabled_users_are_logged_out(self):
+        member, _ = self.make_user('misafir', 'member')
+        self.assertEqual(self.post('/api/users/admin', {'role': 'member'}, method='PATCH').status_code, 400)
+        self.assertEqual(self.post('/api/users/admin', method='DELETE').status_code, 400)
+        self.assertEqual(self.post('/api/users/misafir', {'disabled': True}, method='PATCH').status_code, 200)
+        self.assertIsNone(member.get('/api/session').get_json()['user'])
+        self.assertEqual(self.post('/api/users', {'username': 'A B', 'password': 'Uzun.Sifre1'}).status_code, 400)
+        self.assertEqual(self.post('/api/users', {'username': 'misafir', 'password': 'Uzun.Sifre1'}).status_code, 409)
+        self.assertEqual(self.post('/api/users/misafir', method='DELETE').status_code, 200)
+        self.assertNotIn('misafir', {user['username'] for user in self.library.list_users()})
 
 
 class UploadTests(ApiTestCase):
@@ -585,6 +682,14 @@ class UploadTests(ApiTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse((self.models / 'Sadece resim').exists())
 
+    def test_explicit_upload_visibility_overrides_hidden_default(self):
+        self.login()
+        self.post('/api/settings', {'new_models_hidden': True}, method='PATCH')
+        public = self.upload([('acik.stl', cube_stl_bytes(8))], {'title': 'Açık model', 'hidden': False}).get_json()['models'][0]
+        default = self.upload([('gizli.stl', cube_stl_bytes(9))], {'title': 'Varsayılan model'}).get_json()['models'][0]
+        self.assertFalse(public['hidden'])
+        self.assertTrue(default['hidden'])
+
     def test_files_can_be_added_to_existing_folder_model(self):
         self.login()
         box = self.model_id('Kutu')
@@ -629,9 +734,20 @@ class DatabaseTests(unittest.TestCase):
             library = app.Library(data / 'models', data)
             self.assertEqual(library.settings['site_title'], 'Arşivim')
             self.assertTrue(library.check_password('Eski.Sifre1'))
-            self.assertEqual(library.session_epoch, 4)
+            self.assertEqual(library.get_user('admin')['epoch'], 4)
             self.assertNotIn('admin_password_hash', json.loads((data / 'db.json').read_text())['settings'])
-            self.assertEqual(oct((data / '.admin.json').stat().st_mode & 0o777), '0o600')
+            self.assertEqual(oct((data / '.users.json').stat().st_mode & 0o777), '0o600')
+
+    def test_single_admin_file_migrates_to_admin_user_with_same_password(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            (data / '.admin.json').write_text(json.dumps({
+                'password_hash': app.generate_password_hash('Alibaba.1960'), 'session_epoch': 7,
+            }), encoding='utf-8')
+            library = app.Library(data / 'models', data)
+            user = library.check_login('admin', 'Alibaba.1960')
+            self.assertEqual((user['role'], user['epoch']), ('admin', 7))
+            self.assertFalse((data / '.admin.json').exists())
 
     def test_cli_scan_is_refused_while_server_holds_the_lock(self):
         with tempfile.TemporaryDirectory() as tmp:

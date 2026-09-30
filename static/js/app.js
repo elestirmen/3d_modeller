@@ -8,7 +8,7 @@ import {
   toggleTheme,
 } from './core.js';
 import { DetailView } from './detail.js';
-import { openEdit, openLogin, openSettings, openShare, openUpload, renderLockedScreen } from './admin.js';
+import { openAccount, openEdit, openLogin, openSettings, openShare, openUpload, renderLockedScreen } from './admin.js';
 
 const PAGE_SIZE = 48;
 const RECENT_DAYS = 30;
@@ -24,9 +24,10 @@ const VIEWS = {
   featured: { label: 'Öne çıkanlar', icon: 'star' },
   recent: { label: 'Son eklenenler', icon: 'sparkles' },
   printed: { label: 'Basılanlar', icon: 'printer' },
-  hidden: { label: 'Gizli modeller', icon: 'eye-off', admin: true },
-  nsfw: { label: '18+ içerik', icon: 'lock', admin: true },
-  nothumb: { label: 'Önizlemesi olmayanlar', icon: 'image', admin: true },
+  public: { label: 'Herkese açık', icon: 'globe', manage: 'editor' },
+  hidden: { label: 'Gizli modeller', icon: 'eye-off', manage: 'editor' },
+  nsfw: { label: '18+ içerik', icon: 'lock', manage: 'admin' },
+  nothumb: { label: 'Önizlemesi olmayanlar', icon: 'image', manage: 'editor' },
 };
 const FLAGS = [
   ['multipart', 'Çok parçalı', 'layers'],
@@ -39,7 +40,9 @@ const FLAGS = [
 ];
 
 const state = {
-  admin: Boolean(boot.admin),
+  user: boot.user || null,
+  admin: boot.user?.role === 'admin',
+  canEdit: ['admin', 'editor'].includes(boot.user?.role),
   models: [],
   byId: new Map(),
   stats: {},
@@ -132,6 +135,7 @@ function matchesView(model, view) {
     case 'featured': return model.featured;
     case 'printed': return model.printed;
     case 'recent': return model.added && Date.now() / 1000 - model.added < RECENT_DAYS * 86400;
+    case 'public': return model.public === true;
     case 'hidden': return model.hidden;
     case 'nsfw': return model.nsfw;
     case 'nothumb': return !model.thumb;
@@ -227,20 +231,31 @@ function render() {
   el.searchClear.hidden = !state.filters.q;
 }
 
+function setUser(user) {
+  state.user = user || null;
+  state.admin = state.user?.role === 'admin';
+  state.canEdit = ['admin', 'editor'].includes(state.user?.role);
+  boot.user = state.user;
+  detail?.setRole(state.user?.role || null);
+}
+
 function renderTopActions() {
-  if (state.admin) {
+  const theme = `<button type="button" class="btn btn-icon btn-ghost" data-action="theme" aria-label="Temayı değiştir" title="Temayı değiştir">${icon('moon')}</button>`;
+  if (state.user) {
+    const initial = esc((state.user.name || state.user.username).trim().charAt(0).toLocaleUpperCase('tr'));
     el.topActions.innerHTML = `
-      <button type="button" class="btn btn-icon btn-ghost" data-action="theme" aria-label="Temayı değiştir" title="Temayı değiştir">${icon('moon')}</button>
-      <button type="button" class="btn btn-primary" data-action="upload" title="Model yükle (U)">${icon('cloud-upload')}<span class="btn-label">Yükle</span></button>
+      ${theme}
+      ${state.canEdit ? `<button type="button" class="btn btn-primary" data-action="upload" title="Model yükle (U)">${icon('cloud-upload')}<span class="btn-label">Yükle</span></button>` : ''}
       <div class="menu-wrap">
-        <button type="button" class="admin-pill" data-action="admin-menu" aria-haspopup="menu" aria-expanded="false">
-          <span class="admin-avatar">${icon('shield-check')}</span><span class="admin-name">Yönetici</span>${icon('chevron-down', 'icon-xs')}
+        <button type="button" class="admin-pill" data-action="admin-menu" aria-haspopup="menu" aria-expanded="false" title="${esc(state.user.name)} · ${esc(state.user.roleLabel)}">
+          <span class="admin-avatar">${state.admin ? icon('shield-check') : `<span class="avatar-initial">${initial}</span>`}</span>
+          <span class="admin-name">${esc(state.user.name)}</span>${icon('chevron-down', 'icon-xs')}
         </button>
       </div>`;
   } else {
     el.topActions.innerHTML = `
-      <button type="button" class="btn btn-icon btn-ghost" data-action="theme" aria-label="Temayı değiştir" title="Temayı değiştir">${icon('moon')}</button>
-      <button type="button" class="btn btn-ghost" data-action="login" title="Yönetici girişi">${icon('log-in')}<span class="btn-label">Giriş</span></button>`;
+      ${theme}
+      <button type="button" class="btn btn-ghost" data-action="login" title="Giriş yap">${icon('log-in')}<span class="btn-label">Giriş</span></button>`;
   }
   updateThemeIcon();
 }
@@ -267,7 +282,7 @@ function renderSidebar() {
     categoryCounts.set(model.category, (categoryCounts.get(model.category) || 0) + 1);
     for (const format of model.formats) formatCounts.set(format, (formatCounts.get(format) || 0) + 1);
   }
-  const views = Object.entries(VIEWS).filter(([, view]) => !view.admin || state.admin);
+  const views = Object.entries(VIEWS).filter(([, view]) => !view.manage || (view.manage === 'admin' ? state.admin : state.canEdit));
   const tags = allTags();
   const collections = new Map();
   for (const model of state.models) {
@@ -278,17 +293,17 @@ function renderSidebar() {
       ${iconHtml}<span class="nav-label">${esc(label)}</span><span class="nav-count">${formatNumber(count)}</span>
     </button>`;
 
-  const viewItems = views.filter(([key]) => !VIEWS[key].admin).map(([key, view]) => navItem(
+  const viewItems = views.filter(([key]) => !VIEWS[key].manage).map(([key, view]) => navItem(
     !f.category && f.view === key && !f.tag && !f.collection,
     'view', key, `<span class="nav-icon">${icon(view.icon)}</span>`, view.label,
     key === 'all' ? state.models.length : countBy((model) => matchesView(model, key)),
   )).join('');
-  const adminItems = views.filter(([key]) => VIEWS[key].admin).map(([key, view]) => navItem(
+  const adminItems = views.filter(([key]) => VIEWS[key].manage).map(([key, view]) => navItem(
     f.view === key, 'view', key, `<span class="nav-icon">${icon(view.icon)}</span>`, view.label, countBy((model) => matchesView(model, key)),
   )).join('');
   const categoryItems = categories.map((category) => {
     const count = categoryCounts.get(category.key) || 0;
-    if (!count && !state.admin) return '';
+    if (!count && !state.canEdit) return '';
     return navItem(
       f.category === category.key, 'category', category.key,
       `<span class="cat-dot" style="${categoryStyle(category.key)}">${icon(category.icon)}</span>`,
@@ -310,7 +325,7 @@ function renderSidebar() {
       <h2 class="side-title">Keşfet</h2>
       ${viewItems}
     </div>
-    ${state.admin ? `<div class="side-section"><h2 class="side-title">Yönetim</h2>${adminItems}</div>` : ''}
+    ${state.canEdit ? `<div class="side-section"><h2 class="side-title">Yönetim</h2>${adminItems}</div>` : ''}
     <div class="side-section">
       <h2 class="side-title">Kategoriler</h2>
       ${categoryItems}
@@ -378,7 +393,7 @@ function renderMain() {
   const size = state.visible.reduce((sum, model) => sum + model.size, 0);
   const featured = state.models.filter((model) => model.featured);
   const showRail = !hasActiveFilters() && featured.length > 0;
-  const hiddenCount = state.admin ? state.visible.filter((model) => model.public === false).length : 0;
+  const hiddenCount = state.canEdit ? state.visible.filter((model) => model.public === false).length : 0;
   const categoryChips = `
     <div class="mobile-cats">
       <button type="button" class="chip" data-action="category" data-value="" aria-pressed="${!f.category}">Tümü</button>
@@ -426,8 +441,8 @@ function renderMain() {
       <div class="empty">
         <div class="empty-art">${icon(state.models.length ? 'search' : 'box', 'icon-xl')}</div>
         <h3>${state.models.length ? 'Eşleşen model bulunamadı' : 'Arşiv henüz boş'}</h3>
-        <p>${state.models.length ? 'Arama terimini veya filtreleri değiştirmeyi dene.' : state.admin ? 'İlk modelini yükleyerek başla.' : 'Yakında burada modeller olacak.'}</p>
-        ${state.models.length ? `<button type="button" class="btn" data-action="clear-filters">${icon('x')}Filtreleri temizle</button>` : state.admin ? `<button type="button" class="btn btn-primary" data-action="upload">${icon('cloud-upload')}Model yükle</button>` : ''}
+        <p>${state.models.length ? 'Arama terimini veya filtreleri değiştirmeyi dene.' : state.canEdit ? 'İlk modelini yükleyerek başla.' : 'Yakında burada modeller olacak.'}</p>
+        ${state.models.length ? `<button type="button" class="btn" data-action="clear-filters">${icon('x')}Filtreleri temizle</button>` : state.canEdit ? `<button type="button" class="btn btn-primary" data-action="upload">${icon('cloud-upload')}Model yükle</button>` : ''}
       </div>`;
     return;
   }
@@ -471,7 +486,7 @@ function mediaHtml(model) {
 
 function cardHtml(model) {
   const veil = model.nsfw && !state.revealed.has(model.id);
-  const classes = ['card', veil ? 'nsfw-veil' : '', model.thumbPending && !model.thumb ? 'is-pending' : '', state.admin && model.public === false ? 'is-hidden-model' : ''].join(' ');
+  const classes = ['card', veil ? 'nsfw-veil' : '', model.thumbPending && !model.thumb ? 'is-pending' : ''].join(' ');
   const formats = model.formats.slice(0, 2).map((format) => format.toUpperCase()).join(' · ');
   const tags = model.tags.slice(0, 2);
   return `
@@ -483,12 +498,13 @@ function cardHtml(model) {
           <div>
             ${model.featured ? `<span class="badge badge-glass" title="Öne çıkan">${icon('star', 'icon-xs filled')}</span>` : ''}
             ${model.printed ? `<span class="badge badge-glass" title="Basıldı">${icon('check', 'icon-xs')}</span>` : ''}
-            ${state.admin && model.hidden ? `<span class="badge badge-glass" title="Gizli">${icon('eye-off', 'icon-xs')}</span>` : ''}
+            ${state.canEdit && model.public ? `<span class="badge badge-glass" title="Herkese açık">${icon('globe', 'icon-xs')}</span>` : ''}
+            ${state.canEdit && model.hidden ? `<span class="badge badge-glass" title="Gizli">${icon('eye-off', 'icon-xs')}</span>` : ''}
           </div>
         </div>
         <div class="card-actions">
           <button type="button" class="card-action" data-card-action="share" title="Paylaş" aria-label="Paylaş">${icon('share-2', 'icon-sm')}</button>
-          ${state.admin ? `<button type="button" class="card-action ${model.featured ? 'is-starred' : ''}" data-card-action="feature" title="${model.featured ? 'Öne çıkanlardan çıkar' : 'Öne çıkar'}" aria-label="Öne çıkar">${icon('star', 'icon-sm')}</button>` : ''}
+          ${state.canEdit ? `<button type="button" class="card-action ${model.featured ? 'is-starred' : ''}" data-card-action="feature" title="${model.featured ? 'Öne çıkanlardan çıkar' : 'Öne çıkar'}" aria-label="Öne çıkar">${icon('star', 'icon-sm')}</button>` : ''}
         </div>
       </div>
       <div class="card-body">
@@ -536,14 +552,14 @@ function ensureDetail() {
   detail = new DetailView({
     root: el.detailRoot,
     mode: 'modal',
-    admin: state.admin,
+    role: state.user?.role || null,
     onClose: () => closeDetail(),
     onNavigate: (direction) => navigateDetail(direction),
     onUpdated: (updated, { quiet } = {}) => {
       mergeCard(updated);
       if (!quiet) renderDetail(updated);
     },
-    onShare: (model) => openShare(model, { admin: state.admin, onChange: () => refreshDetail() }),
+    onShare: (model) => openShare(model, { admin: state.canEdit, onChange: () => refreshDetail() }),
     onEdit: (model) => openEdit(model, { allTags: allTags().map(([tag]) => tag), onSaved: (updated) => { mergeCard(updated); renderDetail(updated); } }),
     onUpload: (model) => openUpload({ target: model, allTags: allTags().map(([tag]) => tag), onDone: async (_, { open }) => { await loadLibrary({ quiet: true }); if (open) refreshDetail(); } }),
     onDeleted: (model) => trashModel(model),
@@ -600,7 +616,7 @@ function renderDetail(model) {
 
 async function openDetail(id, { push = true } = {}) {
   const view = ensureDetail();
-  view.setAdmin(state.admin);
+  view.setRole(state.user?.role || null);
   if (!el.detailDialog.open) {
     el.detailRoot.innerHTML = `<div style="display:grid;place-items:center;height:100%"><div class="spinner" style="color:var(--accent)"></div></div>`;
     el.detailDialog.showModal();
@@ -680,10 +696,9 @@ async function trashModel(model) {
 
 // ─── Oturum ─────────────────────────────────────────────────────────
 
-async function afterLogin() {
-  state.admin = true;
-  toast('Hoş geldin! Yönetici olarak giriş yaptın.', 'success');
-  if (detail) detail.setAdmin(true);
+async function afterLogin(result) {
+  setUser(result?.user);
+  toast(`Hoş geldin, ${state.user?.name || ''}! ${state.user?.roleLabel || ''} olarak giriş yaptın.`, 'success');
   await loadLibrary();
   if (state.detailId) refreshDetail();
 }
@@ -693,8 +708,7 @@ async function logout() {
     const result = await api('/api/auth/logout', { method: 'POST' });
     setCsrf(result.csrf);
   } catch { /* yoksay */ }
-  state.admin = false;
-  if (detail) detail.setAdmin(false);
+  setUser(null);
   toast('Çıkış yapıldı', 'info');
   if (!boot.publicBrowsing) {
     window.location.href = '/';
@@ -718,14 +732,23 @@ function startUpload() {
 }
 
 function openAdminMenu(trigger) {
-  openMenu(trigger, [
-    { label: 'Model yükle', icon: 'cloud-upload', onClick: startUpload },
-    { label: 'Ayarlar', icon: 'settings', onClick: () => openSettings({ onChanged: () => loadLibrary({ quiet: true }) }) },
-    { label: 'Paylaşım bağlantıları', icon: 'link', onClick: () => openSettings({ initialTab: 'shares' }) },
-    { label: 'Bakım ve önizlemeler', icon: 'wand-sparkles', onClick: () => openSettings({ initialTab: 'maintenance', onChanged: () => loadLibrary({ quiet: true }) }) },
-    { separator: true },
-    { label: 'Çıkış yap', icon: 'log-out', danger: true, onClick: logout },
-  ], { header: '<div class="menu-header"><strong>Yönetici</strong><span>Oturum açık</span></div>' });
+  const user = state.user;
+  const items = [];
+  if (state.canEdit) items.push({ label: 'Model yükle', icon: 'cloud-upload', onClick: startUpload });
+  if (state.admin) {
+    items.push(
+      { label: 'Ayarlar', icon: 'settings', onClick: () => openSettings({ onChanged: () => loadLibrary({ quiet: true }) }) },
+      { label: 'Kullanıcılar', icon: 'user-round', onClick: () => openSettings({ initialTab: 'users' }) },
+      { label: 'Paylaşım bağlantıları', icon: 'link', onClick: () => openSettings({ initialTab: 'shares' }) },
+      { label: 'Bakım ve önizlemeler', icon: 'wand-sparkles', onClick: () => openSettings({ initialTab: 'maintenance', onChanged: () => loadLibrary({ quiet: true }) }) },
+    );
+  } else {
+    items.push({ label: 'Şifremi değiştir', icon: 'lock', onClick: () => openAccount() });
+  }
+  items.push({ separator: true }, { label: 'Çıkış yap', icon: 'log-out', danger: true, onClick: logout });
+  openMenu(trigger, items, {
+    header: `<div class="menu-header"><strong>${esc(user.name)}</strong><span>@${esc(user.username)} · ${esc(user.roleLabel)}</span></div>`,
+  });
 }
 
 // ─── Olaylar ────────────────────────────────────────────────────────
@@ -792,7 +815,7 @@ function bindEvents() {
       event.stopPropagation();
       const model = state.byId.get(cardAction.closest('.card').dataset.id);
       if (cardAction.dataset.cardAction === 'share') {
-        if (state.admin) api(`/api/models/${encodeURIComponent(model.id)}`).then((full) => openShare(full, { admin: true })).catch((error) => toast(error.message, 'error'));
+        if (state.canEdit) api(`/api/models/${encodeURIComponent(model.id)}`).then((full) => openShare(full, { admin: true })).catch((error) => toast(error.message, 'error'));
         else openShare(model, { admin: false });
       } else if (cardAction.dataset.cardAction === 'feature') {
         api(`/api/models/${encodeURIComponent(model.id)}`, { method: 'PATCH', body: { favorite: !model.featured } })
@@ -874,7 +897,7 @@ function bindEvents() {
       if (event.key === 'ArrowRight') navigateDetail(1);
       return;
     }
-    if (event.key === 'u' && state.admin && !document.querySelector('dialog[open]')) startUpload();
+    if (event.key === 'u' && state.canEdit && !document.querySelector('dialog[open]')) startUpload();
     if (event.key === 'Enter' && event.target.classList?.contains('card')) openDetail(event.target.dataset.id);
   });
 
@@ -916,7 +939,7 @@ window.addEventListener('resize', debounce(fitSearchPlaceholder, 200));
 readUrl();
 bindEvents();
 render();
-if (!boot.publicBrowsing && !state.admin) {
+if (!boot.publicBrowsing && !state.user) {
   renderLocked();
 } else {
   loadLibrary().then(() => {

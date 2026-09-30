@@ -47,7 +47,7 @@ function start() {
   const view = new DetailView({
     root,
     mode: 'share',
-    admin: false,
+    role: null,
     onShare: openShareBox,
   });
   view.render(share.model);

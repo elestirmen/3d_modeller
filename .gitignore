@@ -43,6 +43,7 @@ env/
 db.json
 db.*.json
 .admin.json
+.users.json
 .secret_key
 .server.lock
 .idea/

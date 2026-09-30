@@ -36,6 +36,7 @@ from flask import (
     Response,
     abort,
     current_app,
+    g,
     jsonify,
     render_template,
     request,
@@ -73,6 +74,9 @@ LOGIN_MAX_GLOBAL_FAILURES = 40
 WATCH_INTERVAL = 45
 SHARE_EXPIRY_DAYS = {1, 7, 30, 90, 365}
 MIN_PASSWORD_LENGTH = 8
+ROLES = ('admin', 'editor', 'member')
+ROLE_LABELS = {'admin': 'Yönetici', 'editor': 'Editör', 'member': 'Üye'}
+USERNAME_PATTERN = re.compile(r'[a-z0-9][a-z0-9._-]{2,31}')
 TEXT_FORMATS = {'txt', 'md'}
 PREVIEW_FORMATS = catalog.VIEWABLE_FORMATS | {'png', 'jpg', 'jpeg', 'webp', 'gif'}
 COMPRESSIBLE_FORMATS = {'stl', 'obj', 'ply', 'gltf', 'fbx', 'txt', 'md', 'gcode', 'step', 'stp', 'scad', 'x_t', 'dxf', 'iges', 'igs'}
@@ -83,6 +87,7 @@ DEFAULT_SETTINGS = {
     'public_browsing': True,
     'public_downloads': True,
     'hide_nsfw': True,
+    'new_models_hidden': False,
 }
 # Eski sürümün otomatik ürettiği etiketler; kullanıcı etiketi sayılmaz.
 LEGACY_AUTO_TAGS = {
@@ -91,6 +96,8 @@ LEGACY_AUTO_TAGS = {
     '🔑 Anahtarlık', '📸 Kamera/Lens', '🧩 Puzzle/Bulmaca', '✋ Şaka/Eğlence', '🪑 Mobilya',
     '🔋 Pil/Elektronik', '✏️ Kırtasiye', '👓 Giyilebilir', '🐻 Figür/Heykel', '⭐ Harf/Yazı',
 }
+SETTING_KEYS = ('site_title', 'site_tagline', 'public_browsing', 'public_downloads', 'hide_nsfw', 'new_models_hidden')
+BULK_FIELDS = {'hidden', 'printed', 'favorite', 'nsfw', 'category'}
 PRINT_PROFILE_LABELS = {
     'printer': 'Yazıcı', 'layer_height': 'Katman', 'infill': 'Doluluk', 'material': 'Malzeme',
     'nozzle': 'Nozul', 'supports': 'Destek', 'walls': 'Duvar',
@@ -354,9 +361,10 @@ class Library:
         self.uploads_dir = self.data_dir / '.uploads'
         self.trash_dir = self.data_dir / '.trash'
         self.admin_path = self.data_dir / '.admin.json'
+        self.users_path = self.data_dir / '.users.json'
         self.server_lock_path = self.data_dir / '.server.lock'
-        self._admin = None
-        self._admin_mtime = None
+        self._users = None
+        self._users_mtime = None
         self._server_lock = None
         self.lock = threading.RLock()
         self.scan_lock = threading.Lock()
@@ -417,8 +425,11 @@ class Library:
 
         db, migrated = normalize_db(raw)
         legacy_admin = db.pop('_legacy_admin', None)
-        if legacy_admin and not self.admin_path.exists():
-            self._write_admin(legacy_admin)
+        if legacy_admin and not self.users_path.exists() and not self.admin_path.exists():
+            self._write_users({'admin': self._normalize_user('admin', {
+                'password_hash': legacy_admin['password_hash'], 'role': 'admin', 'name': 'Yönetici',
+                'epoch': legacy_admin['session_epoch'],
+            })})
             migrated = True
         if migrated and raw.get('version') != DB_VERSION:
             backup = self.db_path.with_name(f'db.v1-backup-{time.strftime("%Y%m%d-%H%M%S")}.json')
@@ -513,7 +524,10 @@ class Library:
                 stamp = now()
                 previous = set(db['catalog'])
                 for model_id, record in fresh.items():
-                    user = db['models'].get(model_id) or default_user_record()
+                    user = db['models'].get(model_id)
+                    if user is None:
+                        user = default_user_record()
+                        user['hidden'] = bool(db['settings'].get('new_models_hidden'))
                     if user.get('added_at') is None:
                         user['added_at'] = record['file_date'] if initial else stamp
                     user['missing_since'] = None
@@ -574,12 +588,15 @@ class Library:
         return True
 
     def can_view(self, model_id, viewer):
+        """Yönetici her şeyi; editör ve üyeler gizliler dahil her şeyi (18+ ayarı hariç) görür."""
         if model_id not in self.db['catalog']:
             return False
         if viewer.admin:
             return True
         if viewer.share and viewer.share['model_id'] == model_id:
             return True
+        if viewer.member:
+            return not (self.settings['hide_nsfw'] and self.effective_nsfw(model_id))
         return self.is_public(model_id)
 
     def can_download(self, model_id, viewer):
@@ -587,6 +604,8 @@ class Library:
             return True
         if viewer.share and viewer.share['model_id'] == model_id:
             return viewer.share['allow_download']
+        if viewer.member:
+            return self.can_view(model_id, viewer)
         return self.is_public(model_id) and self.settings['public_downloads']
 
     def thumb_source(self, model_id):
@@ -720,7 +739,7 @@ class Library:
                 categories.fold(values['author'] or ''),
             ])),
         }
-        if viewer.admin:
+        if viewer.editor:
             card['hidden'] = user['hidden']
             card['public'] = self.is_public(model_id)
         return card
@@ -788,7 +807,7 @@ class Library:
             'downloadAllUrl': with_share(f'/api/models/{model_id}/download', share) if can_download else None,
             'categoryLabel': self.category_label(values['category']),
         })
-        if viewer.admin:
+        if viewer.editor:
             detail.update({
                 'note': user['note'],
                 'hidden': user['hidden'],
@@ -835,7 +854,7 @@ class Library:
 
     # ── Güncelleme ──
 
-    def update_model(self, model_id, payload):
+    def update_model(self, model_id, payload, save=True):
         with self.lock:
             if model_id not in self.db['catalog']:
                 abort(404, description='Model bulunamadı')
@@ -888,8 +907,21 @@ class Library:
                     if value not in valid:
                         abort(400, description='Kapak görseli bu modele ait değil')
                     user['cover'] = value
+            if save:
+                self.save()
+        if 'cover' in payload:
+            self.queue_derived([model_id])
+
+    def bulk_update(self, model_ids, changes):
+        """Görünürlük gibi basit alanları birçok modelde tek kayıtla güncelle."""
+        with self.lock:
+            updated = 0
+            for model_id in model_ids:
+                if model_id in self.db['catalog']:
+                    self.update_model(model_id, changes, save=False)
+                    updated += 1
             self.save()
-        self.queue_derived([model_id])
+        return updated
 
     def trash_model(self, model_id):
         """Modeli silmek yerine veri klasöründeki çöp kutusuna taşı."""
@@ -1466,62 +1498,185 @@ class Library:
                 share['last_viewed_at'] = now()
                 self.save()
 
-    # ── Kimlik doğrulama ──
+    # ── Kullanıcılar ve kimlik doğrulama ──
 
-    # Kimlik bilgileri db.json'dan ayrı tutulur; böylece CLI ile şifre değiştirmek
-    # çalışan sunucunun bellekteki veritabanıyla çakışmaz.
+    # Kullanıcılar db.json'dan ayrı, 0600 izinli .users.json dosyasında tutulur; böylece CLI ile
+    # şifre değiştirmek çalışan sunucunun bellekteki veritabanıyla çakışmaz.
 
-    def _read_admin(self):
+    def _normalize_user(self, username, record):
+        record = record if isinstance(record, dict) else {}
+        role = record.get('role') if record.get('role') in ROLES else 'member'
+        return {
+            'password_hash': str(record.get('password_hash') or ''),
+            'role': role,
+            'name': clean_text(record.get('name'), 60) or username,
+            'epoch': coerce_int(record.get('epoch'), 1),
+            'created_at': float(record['created_at']) if isinstance(record.get('created_at'), (int, float)) else now(),
+            'last_login': float(record['last_login']) if isinstance(record.get('last_login'), (int, float)) else None,
+            'disabled': bool(record.get('disabled', False)),
+        }
+
+    def _read_users(self):
         try:
-            mtime = self.admin_path.stat().st_mtime_ns
+            mtime = self.users_path.stat().st_mtime_ns
         except OSError:
-            return {'password_hash': '', 'session_epoch': 1}
-        if self._admin is None or mtime != self._admin_mtime:
+            return self._migrate_admin_file()
+        if self._users is None or mtime != self._users_mtime:
             try:
-                data = json.loads(self.admin_path.read_text(encoding='utf-8'))
+                data = json.loads(self.users_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 data = {}
-            self._admin = {
-                'password_hash': str(data.get('password_hash') or ''),
-                'session_epoch': coerce_int(data.get('session_epoch'), 1),
-            }
-            self._admin_mtime = mtime
-        return self._admin
+            raw_users = data.get('users') if isinstance(data, dict) and isinstance(data.get('users'), dict) else {}
+            self._users = {str(name): self._normalize_user(str(name), record) for name, record in raw_users.items()}
+            self._users_mtime = mtime
+        return self._users
 
-    def _write_admin(self, data):
+    def _migrate_admin_file(self):
+        """Eski tek yöneticili .admin.json dosyasını 'admin' kullanıcısına taşı (şifre aynı kalır)."""
+        try:
+            legacy = json.loads(self.admin_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(legacy, dict) or not legacy.get('password_hash'):
+            return {}
+        users = {'admin': self._normalize_user('admin', {
+            'password_hash': legacy['password_hash'], 'role': 'admin', 'name': 'Yönetici',
+            'epoch': coerce_int(legacy.get('session_epoch'), 1),
+        })}
+        self._write_users(users)
+        try:
+            self.admin_path.unlink()
+        except OSError:
+            pass
+        log.info('Yönetici hesabı "admin" kullanıcısına taşındı')
+        return self._read_users()
+
+    def _write_users(self, users):
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix='.admin-', suffix='.json', dir=self.data_dir)
+        fd, tmp_name = tempfile.mkstemp(prefix='.users-', suffix='.json', dir=self.data_dir)
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            json.dump(data, handle)
+            json.dump({'users': users}, handle, ensure_ascii=False)
         os.chmod(tmp_name, 0o600)
-        os.replace(tmp_name, self.admin_path)
-        self._admin = None
+        os.replace(tmp_name, self.users_path)
+        self._users = None
 
-    @property
-    def session_epoch(self):
-        return self._read_admin()['session_epoch']
+    def get_user(self, username):
+        return self._read_users().get(str(username or ''))
 
     def password_is_set(self):
-        return bool(self._read_admin()['password_hash'])
+        return any(user['password_hash'] and user['role'] == 'admin' and not user['disabled'] for user in self._read_users().values())
 
-    def set_password(self, password):
+    def set_password(self, password, username='admin'):
+        """Kullanıcının şifresini değiştir (yoksa 'admin' için yönetici hesabı oluştur); oturumları kapatır."""
         if len(password or '') < MIN_PASSWORD_LENGTH:
             raise ValueError(f'Şifre en az {MIN_PASSWORD_LENGTH} karakter olmalı')
         with self.lock:
-            current = self._read_admin()
-            self._write_admin({
-                'password_hash': generate_password_hash(password),
-                'session_epoch': current['session_epoch'] + 1,
-            })
+            users = {name: dict(record) for name, record in self._read_users().items()}
+            record = users.get(username)
+            if record is None:
+                record = self._normalize_user(username, {'role': 'admin', 'name': 'Yönetici'})
+                record['epoch'] = 0
+            record['password_hash'] = generate_password_hash(password)
+            record['epoch'] += 1
+            users[username] = record
+            self._write_users(users)
 
-    def check_password(self, password):
-        stored = self._read_admin()['password_hash']
-        if not stored or not isinstance(password, str):
-            return False
+    def check_login(self, username, password):
+        user = self.get_user(username)
+        if not user or user['disabled'] or not user['password_hash'] or not isinstance(password, str):
+            return None
         try:
-            return check_password_hash(stored, password)
+            return user if check_password_hash(user['password_hash'], password) else None
         except (ValueError, TypeError):
-            return False
+            return None
+
+    def check_password(self, password, username='admin'):
+        return self.check_login(username, password) is not None
+
+    def record_login(self, username):
+        with self.lock:
+            users = {name: dict(record) for name, record in self._read_users().items()}
+            if username in users:
+                users[username]['last_login'] = now()
+                self._write_users(users)
+
+    def user_payload(self, username, record):
+        return {
+            'username': username,
+            'name': record['name'],
+            'role': record['role'],
+            'roleLabel': ROLE_LABELS[record['role']],
+            'disabled': record['disabled'],
+            'createdAt': record['created_at'],
+            'lastLogin': record['last_login'],
+        }
+
+    def list_users(self):
+        users = self._read_users()
+        order = {role: index for index, role in enumerate(ROLES)}
+        return [self.user_payload(name, record) for name, record in sorted(users.items(), key=lambda item: (order[item[1]['role']], item[0]))]
+
+    def _active_admins(self, users):
+        return [name for name, record in users.items() if record['role'] == 'admin' and not record['disabled']]
+
+    def create_user(self, username, password, role='member', name=''):
+        username = str(username or '').strip().lower()
+        if not USERNAME_PATTERN.fullmatch(username):
+            abort(400, description='Kullanıcı adı 3-32 karakter olmalı; küçük harf, rakam, nokta, tire ve alt çizgi kullanılabilir')
+        if role not in ROLES:
+            abort(400, description='Geçersiz rol')
+        if len(password or '') < MIN_PASSWORD_LENGTH:
+            abort(400, description=f'Şifre en az {MIN_PASSWORD_LENGTH} karakter olmalı')
+        with self.lock:
+            users = {key: dict(record) for key, record in self._read_users().items()}
+            if username in users:
+                abort(409, description='Bu kullanıcı adı zaten kullanılıyor')
+            record = self._normalize_user(username, {'role': role, 'name': name or username})
+            record['password_hash'] = generate_password_hash(password)
+            users[username] = record
+            self._write_users(users)
+            return self.user_payload(username, record)
+
+    def update_user(self, username, changes, acting):
+        with self.lock:
+            users = {key: dict(record) for key, record in self._read_users().items()}
+            record = users.get(username)
+            if record is None:
+                abort(404, description='Kullanıcı bulunamadı')
+            if 'role' in changes:
+                if changes['role'] not in ROLES:
+                    abort(400, description='Geçersiz rol')
+                if username == acting and changes['role'] != 'admin':
+                    abort(400, description='Kendi yönetici yetkini kaldıramazsın')
+                record['role'] = changes['role']
+            if 'disabled' in changes:
+                if username == acting and changes['disabled']:
+                    abort(400, description='Kendi hesabını devre dışı bırakamazsın')
+                record['disabled'] = bool(changes['disabled'])
+            if 'name' in changes:
+                record['name'] = clean_text(changes['name'], 60) or username
+            if changes.get('password'):
+                if len(changes['password']) < MIN_PASSWORD_LENGTH:
+                    abort(400, description=f'Şifre en az {MIN_PASSWORD_LENGTH} karakter olmalı')
+                record['password_hash'] = generate_password_hash(changes['password'])
+                record['epoch'] += 1
+            users[username] = record
+            if not self._active_admins(users):
+                abort(400, description='En az bir etkin yönetici hesabı kalmalı')
+            self._write_users(users)
+            return self.user_payload(username, record)
+
+    def delete_user(self, username, acting):
+        with self.lock:
+            users = {key: dict(record) for key, record in self._read_users().items()}
+            if username not in users:
+                abort(404, description='Kullanıcı bulunamadı')
+            if username == acting:
+                abort(400, description='Kendi hesabını silemezsin')
+            del users[username]
+            if not self._active_admins(users):
+                abort(400, description='En az bir etkin yönetici hesabı kalmalı')
+            self._write_users(users)
 
     def login_blocked(self, client):
         stamp = now()
@@ -1605,8 +1760,12 @@ def extract_zip_safely(zip_path, destination, zip_name=''):
 
 
 class Viewer:
-    def __init__(self, admin=False, share=None, share_token=None):
-        self.admin = admin
+    def __init__(self, user=None, share=None, share_token=None):
+        self.user = user
+        self.role = user['role'] if user else None
+        self.admin = self.role == 'admin'
+        self.editor = self.role in {'admin', 'editor'}
+        self.member = self.role is not None
         self.share = share
         self.share_token = share_token if share else None
 
@@ -1615,10 +1774,22 @@ def lib():
     return current_app.extensions['library']
 
 
+def current_user():
+    """Oturumdaki etkin kullanıcıyı döndür (şifre değişince veya hesap kapatılınca oturum düşer)."""
+    if 'current_user' in g:
+        return g.current_user
+    username = session.get('user') or ('admin' if session.get('admin') else None)
+    record = lib().get_user(username) if username else None
+    user = None
+    if record and not record['disabled'] and session.get('epoch') == record['epoch']:
+        user = {'username': username, 'role': record['role'], 'name': record['name'], 'roleLabel': ROLE_LABELS[record['role']]}
+    g.current_user = user
+    return user
+
+
 def is_admin():
-    if not session.get('admin'):
-        return False
-    return session.get('epoch') == lib().session_epoch
+    user = current_user()
+    return bool(user and user['role'] == 'admin')
 
 
 def csrf_token():
@@ -1632,20 +1803,35 @@ def csrf_token():
 def current_viewer(share_token=None):
     token = share_token or request.args.get('s')
     share = lib().resolve_share(token) if token else None
-    return Viewer(admin=is_admin(), share=share, share_token=token)
+    return Viewer(user=current_user(), share=share, share_token=token)
 
 
 def client_key():
+    """Giriş denemesi sınırı için istemci kimliği: Cloudflare arkasında gerçek istemci IP'si."""
+    forwarded = request.headers.get('CF-Connecting-IP', '').strip()
+    if forwarded and re.fullmatch(r'[0-9A-Fa-f:.]{3,45}', forwarded):
+        return forwarded
     return request.remote_addr or 'unknown'
 
 
-def require_admin(view):
-    @wraps(view)
-    def wrapper(*args, **kwargs):
-        if not is_admin():
-            abort(401, description='Bu işlem için yönetici girişi gerekli')
-        return view(*args, **kwargs)
-    return wrapper
+def require_role(*roles):
+    """Giriş yoksa 401, rol yetmiyorsa 403 döndüren dekoratör."""
+    def decorator(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            user = current_user()
+            if not user:
+                abort(401, description='Bu işlem için giriş yapmalısın')
+            if user['role'] not in roles:
+                abort(403, description='Bu işlem için yetkin yok')
+            return view(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+require_admin = require_role('admin')
+require_editor = require_role('admin', 'editor')
+require_login = require_role(*ROLES)
 
 
 def json_body():
@@ -1684,6 +1870,11 @@ def ensure_file_access(rel_path, viewer, download=False):
     if viewer.share and viewer.share['model_id'] in owners:
         if download and not viewer.share['allow_download']:
             abort(403, description='Bu dosyayı indirme izniniz yok')
+        return
+    if viewer.member:
+        with library.lock:
+            if not all(library.can_view(model_id, viewer) for model_id in owners):
+                abort(404)
         return
     with library.lock:
         if not all(library.is_public(model_id) for model_id in owners):
@@ -1724,9 +1915,11 @@ def boot_payload(**extra):
     payload = {
         'site': {'title': settings['site_title'], 'tagline': settings['site_tagline']},
         'admin': is_admin(),
+        'user': current_user(),
         'csrf': csrf_token(),
         'passwordSet': library.password_is_set(),
         'publicBrowsing': settings['public_browsing'],
+        'newModelsHidden': settings['new_models_hidden'],
         'categories': categories.category_payload(),
         'chunkSize': CHUNK_SIZE,
         'uploadFormats': sorted(fmt.lstrip('.') for fmt in catalog.SUPPORTED_FORMATS if fmt not in {'.rar', '.7z'}),
@@ -1826,7 +2019,7 @@ def share_page(token):
         return render_template('share.html', boot=boot_payload(share=None), og=None), 404
     viewer = current_viewer(share_token=token)
     detail = library.detail(share['model_id'], viewer)
-    if not viewer.admin:
+    if not viewer.editor:
         library.record_share_view(token)
     boot = boot_payload(share={'token': token, 'model': detail, 'allowDownload': share['allow_download'], 'expiresAt': share['expires_at']})
     return render_template('share.html', boot=boot, og=og_meta(share['model_id'], viewer, token))
@@ -1847,7 +2040,8 @@ def healthz():
 
 @bp.route('/api/session')
 def api_session():
-    return jsonify({'admin': is_admin(), 'csrf': csrf_token(), 'passwordSet': lib().password_is_set()})
+    user = current_user()
+    return jsonify({'user': user, 'admin': bool(user and user['role'] == 'admin'), 'csrf': csrf_token(), 'passwordSet': lib().password_is_set()})
 
 
 @bp.route('/api/auth/login', methods=['POST'])
@@ -1860,38 +2054,76 @@ def api_login():
         abort(429, description=f'Çok fazla hatalı deneme. {minutes} dakika sonra tekrar deneyin.')
     if not library.password_is_set():
         abort(503, description='Yönetici şifresi henüz ayarlanmamış. Sunucuda "python app.py set-admin-password" çalıştırın.')
-    password = json_body().get('password')
-    if not library.check_password(password):
+    data = json_body()
+    username = clean_text(data.get('username') or 'admin', 32).lower()
+    record = library.check_login(username, data.get('password'))
+    if record is None:
         library.record_login_failure(client)
         time.sleep(0.4)
-        abort(401, description='Şifre hatalı')
+        abort(401, description='Kullanıcı adı veya şifre hatalı')
     library.clear_login_failures(client)
+    library.record_login(username)
     session.clear()
     session.permanent = True
-    session['admin'] = True
-    session['epoch'] = library.session_epoch
+    session['user'] = username
+    session['epoch'] = record['epoch']
     session['csrf'] = secrets.token_urlsafe(24)
-    return jsonify({'admin': True, 'csrf': session['csrf']})
+    g.pop('current_user', None)
+    user = current_user()
+    return jsonify({'user': user, 'admin': user['role'] == 'admin', 'csrf': session['csrf']})
 
 
 @bp.route('/api/auth/logout', methods=['POST'])
 def api_logout():
     session.clear()
-    return jsonify({'admin': False, 'csrf': csrf_token()})
+    g.pop('current_user', None)
+    return jsonify({'user': None, 'admin': False, 'csrf': csrf_token()})
 
 
 @bp.route('/api/auth/password', methods=['POST'])
-@require_admin
+@require_login
 def api_change_password():
+    """Her kullanıcı kendi şifresini değiştirir; diğer cihazlardaki oturumları kapanır."""
     library = lib()
     data = json_body()
-    if not library.check_password(data.get('current')):
+    username = current_user()['username']
+    if library.check_login(username, data.get('current')) is None:
         abort(400, description='Mevcut şifre hatalı')
     try:
-        library.set_password(str(data.get('new') or ''))
+        library.set_password(str(data.get('new') or ''), username=username)
     except ValueError as exc:
         abort(400, description=str(exc))
-    session['epoch'] = library.session_epoch
+    session['epoch'] = library.get_user(username)['epoch']
+    g.pop('current_user', None)
+    return jsonify({'success': True})
+
+
+@bp.route('/api/users')
+@require_admin
+def api_users():
+    return jsonify({'users': lib().list_users(), 'roles': [{'key': role, 'label': ROLE_LABELS[role]} for role in ROLES]})
+
+
+@bp.route('/api/users', methods=['POST'])
+@require_admin
+def api_create_user():
+    data = json_body()
+    user = lib().create_user(data.get('username'), str(data.get('password') or ''), data.get('role') or 'member', data.get('name') or '')
+    return jsonify(user), 201
+
+
+@bp.route('/api/users/<username>', methods=['PATCH'])
+@require_admin
+def api_update_user(username):
+    data = json_body()
+    changes = {key: data[key] for key in ('role', 'disabled', 'name', 'password') if key in data}
+    return jsonify(lib().update_user(username, changes, current_user()['username']))
+
+
+@bp.route('/api/users/<username>', methods=['DELETE'])
+@require_admin
+def api_delete_user(username):
+    lib().delete_user(username, current_user()['username'])
     return jsonify({'success': True})
 
 
@@ -1903,7 +2135,7 @@ def api_library():
     library = lib()
     library.ensure_scanned()
     viewer = current_viewer()
-    if not viewer.admin and not library.settings['public_browsing']:
+    if not viewer.member and not library.settings['public_browsing']:
         abort(401, description='Bu arşiv özel. Görüntülemek için giriş yapın.')
     return jsonify(library.library_payload(viewer))
 
@@ -1919,7 +2151,7 @@ def api_model(model_id):
 
 
 @bp.route('/api/models/<model_id>', methods=['PATCH'])
-@require_admin
+@require_editor
 def api_update_model(model_id):
     library = lib()
     library.update_model(model_id, json_body())
@@ -1935,7 +2167,7 @@ def api_delete_model(model_id):
 
 
 @bp.route('/api/models/<model_id>/thumbnail', methods=['POST'])
-@require_admin
+@require_editor
 def api_refresh_thumbnail(model_id):
     library = lib()
     with library.lock:
@@ -2183,7 +2415,7 @@ def api_rebuild_thumbnails():
 @require_admin
 def api_settings():
     settings = lib().settings
-    return jsonify({key: settings[key] for key in ('site_title', 'site_tagline', 'public_browsing', 'public_downloads', 'hide_nsfw')})
+    return jsonify({key: settings[key] for key in SETTING_KEYS})
 
 
 @bp.route('/api/settings', methods=['PATCH'])
@@ -2197,15 +2429,35 @@ def api_update_settings():
             settings['site_title'] = clean_text(data['site_title'], 60) or DEFAULT_SETTINGS['site_title']
         if 'site_tagline' in data:
             settings['site_tagline'] = clean_text(data['site_tagline'], 140)
-        for key in ('public_browsing', 'public_downloads', 'hide_nsfw'):
+        for key in ('public_browsing', 'public_downloads', 'hide_nsfw', 'new_models_hidden'):
             if key in data:
                 settings[key] = bool(data[key])
         library.save()
-        return jsonify({key: settings[key] for key in ('site_title', 'site_tagline', 'public_browsing', 'public_downloads', 'hide_nsfw')})
+        return jsonify({key: settings[key] for key in SETTING_KEYS})
+
+
+@bp.route('/api/admin/bulk', methods=['POST'])
+@require_admin
+def api_bulk_update():
+    """Birden çok modelde görünürlük/işaret değiştir. ids: kimlik listesi veya "all"."""
+    library = lib()
+    data = json_body()
+    changes = data.get('changes')
+    if not isinstance(changes, dict) or not changes or set(changes) - BULK_FIELDS:
+        abort(400, description='Desteklenmeyen toplu değişiklik')
+    ids = data.get('ids')
+    with library.lock:
+        if ids == 'all':
+            targets = list(library.db['catalog'])
+        elif isinstance(ids, list):
+            targets = [str(model_id) for model_id in ids if str(model_id) in library.db['catalog']]
+        else:
+            abort(400, description='ids bir liste veya "all" olmalı')
+    return jsonify({'updated': library.bulk_update(targets, changes)})
 
 
 @bp.route('/api/classify', methods=['POST'])
-@require_admin
+@require_editor
 def api_classify():
     """Yükleme formu için başlık ve dosya adlarından kategori/etiket öner."""
     data = json_body()
@@ -2228,13 +2480,13 @@ def api_classify():
 
 
 @bp.route('/api/uploads', methods=['POST'])
-@require_admin
+@require_editor
 def api_create_upload():
     return jsonify(lib().create_upload(json_body().get('files')))
 
 
 @bp.route('/api/uploads/<upload_id>/<int:index>', methods=['PUT'])
-@require_admin
+@require_editor
 def api_upload_chunk(upload_id, index):
     offset = coerce_int(request.headers.get('X-Upload-Offset'), -1)
     length = request.content_length
@@ -2246,7 +2498,7 @@ def api_upload_chunk(upload_id, index):
 
 
 @bp.route('/api/uploads/<upload_id>/complete', methods=['POST'])
-@require_admin
+@require_editor
 def api_complete_upload(upload_id):
     library = lib()
     created = library.finish_upload(upload_id, json_body())
@@ -2256,7 +2508,7 @@ def api_complete_upload(upload_id):
 
 
 @bp.route('/api/uploads/<upload_id>', methods=['DELETE'])
-@require_admin
+@require_editor
 def api_cancel_upload(upload_id):
     lib().cancel_upload(upload_id)
     return jsonify({'success': True})
@@ -2272,7 +2524,7 @@ def api_shares():
 
 
 @bp.route('/api/models/<model_id>/shares', methods=['POST'])
-@require_admin
+@require_editor
 def api_create_share(model_id):
     data = json_body()
     days = data.get('expires_days')
@@ -2282,7 +2534,7 @@ def api_create_share(model_id):
 
 
 @bp.route('/api/shares/<token>', methods=['PATCH'])
-@require_admin
+@require_editor
 def api_update_share(token):
     data = json_body()
     if 'expires_days' in data and data['expires_days'] is not None:
@@ -2291,7 +2543,7 @@ def api_update_share(token):
 
 
 @bp.route('/api/shares/<token>', methods=['DELETE'])
-@require_admin
+@require_editor
 def api_delete_share(token):
     lib().delete_share(token)
     return jsonify({'success': True})

@@ -7,6 +7,7 @@ db.json
 db.*.json
 .secret_key
 .admin.json
+.users.json
 .server.lock
 thumbnails/
 .uploads/

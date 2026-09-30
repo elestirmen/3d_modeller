@@ -11,6 +11,8 @@
 - **3D görüntüleyici:** STL, 3MF (Bambu/Orca/Creality çok dosyalı 3MF dahil), OBJ, PLY, GLB/GLTF. Filament rengi önizleme, tel kafes, ölçü kutusu, tam ekran. Büyük 3MF/OBJ/PLY dosyaları sunucuda kompakt biçime çevrilip önbelleğe alınır; çok büyük parçalar tıklayınca yüklenir.
 - **Yükleme:** Sürükle-bırak, klasör seçimi, 8 MB'lık parçalarla kesintiye dayanıklı yükleme (Cloudflare 100 MB sınırına takılmaz). ZIP arşivleri güvenli biçimde açılır. Kategori ve etiketler dosya adından canlı önerilir. Var olan modele dosya eklenebilir.
 - **Paylaşım:** Model başına `/s/<token>` bağlantıları; süre (1 gün–1 yıl veya süresiz), indirme izni, not, görüntülenme sayısı, iptal. Gizli modellerde ve özel arşivde de çalışır. QR kod, WhatsApp/Telegram/e-posta ve zengin bağlantı önizlemesi (Open Graph görseli). Herkese açık modeller `/m/<id>` ile de paylaşılabilir.
+- **Kullanıcılar ve roller:** Kullanıcı adı + şifreyle giriş. **Yönetici** her şeyi yapar; **Editör** model yükler, düzenler, görünürlüğü ve paylaşımları yönetir; **Üye** gizliler dahil tüm arşivi görür ve indirir (18+ hariç). Hesaplar Ayarlar → Kullanıcılar'dan yönetilir; en az bir etkin yönetici her zaman korunur.
+- **Vitrin modu:** "Yeni modeller varsayılan olarak gizli" ayarıyla yüklenen veya klasöre eklenen modeller sen yayınlayana kadar ziyaretçilere görünmez; toplu gizle/yayınla işlemleri Ayarlar → Gizlilik'te.
 - **Yönetim:** Öne çıkanlar, basıldı işareti, özel not, ziyaretçilerden gizleme, 18+ işareti (adlardan otomatik algılanır, varsayılan olarak ziyaretçilere gizlenir), çöp kutusu (dosyalar silinmez, `.trash/` klasörüne taşınır), ayarlar (site adı, arşiv gizliliği, ziyaretçi indirmeleri, şifre değiştirme, bakım).
 - **Arayüz:** Açık/koyu tema, anlık istemci tarafı arama ve filtreler (URL'e yazılır, paylaşılabilir), sonsuz kaydırma, klavye kısayolları (`Ctrl+K` / `/` arama, `←` `→` modeller arası, `Esc` kapat, `U` yükle), mobil uyumlu yerleşim. Tüm varlıklar yerel; internet bağlantısı gerektirmez.
 
@@ -32,7 +34,7 @@ python app.py thumbnails            # eksik önizleme ve ölçüleri üret (--al
 echo 'yeni-sifre' | python app.py set-admin-password --stdin
 ```
 
-Yönetici şifresi yalnızca hash olarak `db.json` içinde saklanır; depoya hiçbir şifre yazılmaz.
+Kullanıcılar ve şifre hash'leri `db.json`'dan ayrı, `0600` izinli `.users.json` dosyasında saklanır; depoya hiçbir şifre yazılmaz. `set-admin-password` komutu `admin` kullanıcısının şifresini belirler (yoksa oluşturur); diğer kullanıcılar arayüzden eklenir.
 
 ## Ortam değişkenleri
 
@@ -41,7 +43,7 @@ Yönetici şifresi yalnızca hash olarak `db.json` içinde saklanır; depoya hi�
 | `MODEL_MANAGER_HOST` / `MODEL_MANAGER_PORT` | Dinlenecek adres ve port | `127.0.0.1` / `5000` |
 | `MODEL_MANAGER_DEBUG` | Flask hata ayıklama modu | kapalı |
 | `MODEL_MANAGER_MODELS_DIR` | Model klasörü | `./3d models` |
-| `MODEL_MANAGER_DATA_DIR` | `db.json`, `thumbnails/`, `.uploads/`, `.trash/`, `.secret_key` konumu | uygulama klasörü |
+| `MODEL_MANAGER_DATA_DIR` | `db.json`, `.users.json`, `thumbnails/`, `.uploads/`, `.trash/`, `.secret_key` konumu | uygulama klasörü |
 | `MODEL_MANAGER_WORKERS` | gunicorn altında arka plan işçilerini (izleyici + önizleme kuyruğu) başlat | kapalı |
 | `MODEL_MANAGER_TRUST_PROXY` | Ters vekil başlıklarına (X-Forwarded-*) güven | kapalı |
 | `MODEL_MANAGER_SECURE_COOKIES` | Oturum çerezini yalnızca HTTPS'te gönder | kapalı |
@@ -68,7 +70,8 @@ Veritabanı (`db.json`) kullanıcı verisini (kategori/başlık düzeltmeleri, e
 - `GET /api/models/<id>` — model detayı · `PATCH` düzenle · `DELETE` çöp kutusuna taşı (yönetici)
 - `GET /api/models/<id>/download` — tüm dosyalar ZIP olarak (akış halinde)
 - `GET /api/file/<yol>` · `/api/mesh/<yol>` · `/api/preview/<yol>` · `/api/thumb/<id>` · `/api/og/<id>`
-- `POST /api/auth/login` · `POST /api/auth/logout` · `POST /api/auth/password`
+- `POST /api/auth/login` (`username`, `password`) · `POST /api/auth/logout` · `POST /api/auth/password` (kendi şifresi)
+- `GET`/`POST /api/users` · `PATCH`/`DELETE /api/users/<kullanıcı>` (yönetici) · `POST /api/admin/bulk` (toplu görünürlük)
 - `POST /api/uploads` → `PUT /api/uploads/<id>/<dosya>` (parça, `X-Upload-Offset`) → `POST /api/uploads/<id>/complete`
 - `GET /api/shares` · `POST /api/models/<id>/shares` · `PATCH`/`DELETE /api/shares/<token>` · sayfa: `/s/<token>`
 - `GET`/`PATCH /api/settings` · `POST /api/scan` · `GET /api/admin/status` · `POST /api/admin/thumbnails`

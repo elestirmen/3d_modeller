@@ -28,10 +28,10 @@ function autoLoadLimit() {
 }
 
 export class DetailView {
-  constructor({ root, mode = 'modal', admin = false, onClose, onNavigate, onUpdated, onShare, onEdit, onUpload, onDeleted, onOpenModel, onTag }) {
+  constructor({ root, mode = 'modal', role = null, onClose, onNavigate, onUpdated, onShare, onEdit, onUpload, onDeleted, onOpenModel, onTag }) {
     this.root = root;
     this.mode = mode;
-    this.admin = admin;
+    this.setRole(role);
     this.handlers = { onClose, onNavigate, onUpdated, onShare, onEdit, onUpload, onDeleted, onOpenModel, onTag };
     this.model = null;
     this.viewer = null;
@@ -47,8 +47,10 @@ export class DetailView {
     });
   }
 
-  setAdmin(admin) {
-    this.admin = admin;
+  setRole(role) {
+    this.role = role;
+    this.canEdit = role === 'admin' || role === 'editor';
+    this.isAdmin = role === 'admin';
   }
 
   render(model, { prev = null, next = null, similar = [] } = {}) {
@@ -77,7 +79,7 @@ export class DetailView {
 
   template(model) {
     const catKey = model.category;
-    const admin = this.admin;
+    const admin = this.canEdit;
     const stats = model.stats || {};
     const hasImages = model.images.length > 0;
     const downloadLabel = model.fileCount > 1 || model.assets.some((item) => !item.member && item.kind !== 'archive')
@@ -153,6 +155,7 @@ export class DetailView {
               ${model.collection ? `<span class="badge">${icon('layers', 'icon-xs')}${esc(model.collection)}</span>` : ''}
               ${model.printed ? `<span class="badge badge-success">${icon('check', 'icon-xs')}Basıldı</span>` : ''}
               ${model.nsfw ? '<span class="badge badge-danger">18+</span>' : ''}
+              ${admin && model.public ? `<span class="badge badge-success">${icon('globe', 'icon-xs')}Herkese açık</span>` : ''}
               ${admin && model.hidden ? `<span class="badge badge-warning">${icon('eye-off', 'icon-xs')}Gizli</span>` : ''}
               ${admin && !model.hidden && model.public === false ? `<span class="badge badge-warning" title="Ziyaretçilere görünmüyor">${icon('lock', 'icon-xs')}Özel</span>` : ''}
             </div>
@@ -556,8 +559,8 @@ export class DetailView {
       { label: 'Bilgileri düzenle', icon: 'pencil', onClick: () => this.handlers.onEdit?.(model) },
       model.kind === 'folder' && { label: 'Dosya ekle', icon: 'file-plus', onClick: () => this.handlers.onUpload?.(model) },
       { label: 'Önizlemeyi yeniden oluştur', icon: 'refresh-cw', onClick: () => this.refreshThumbnail() },
-      { separator: true },
-      { label: 'Çöp kutusuna taşı', icon: 'trash-2', danger: true, onClick: () => this.handlers.onDeleted?.(model) },
+      this.isAdmin && { separator: true },
+      this.isAdmin && { label: 'Çöp kutusuna taşı', icon: 'trash-2', danger: true, onClick: () => this.handlers.onDeleted?.(model) },
     ].filter(Boolean);
     openMenu(trigger, items);
   }
