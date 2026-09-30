@@ -3,7 +3,7 @@
  */
 
 import {
-  $, api, boot, categories, categoryIcon, categoryLabel, categoryStyle, closeMenus, confirmDialog, debounce, esc,
+  $, api, boot, categories, categoryIcon, categoryLabel, categoryStyle, confirmDialog, debounce, esc,
   fold, formatBytes, formatNumber, formatRelative, icon, isMobile, openMenu, setCsrf, storage, store, toast,
   toggleTheme,
 } from './core.js';
@@ -925,7 +925,6 @@ function bindEvents() {
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', updateThemeIcon);
   window.addEventListener('resize', debounce(() => { if (!isMobile()) setSidebar(false); }, 150));
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setSidebar(false); });
-  window.addEventListener('scroll', closeMenus, { passive: true });
 }
 
 // ─── Başlat ─────────────────────────────────────────────────────────
