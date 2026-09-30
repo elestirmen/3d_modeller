@@ -119,9 +119,10 @@ KEYWORDS = {
         'knight': 3, 'wizard': 3, 'skull': 2, 'kafatasi': 2,
     },
     'keychain': {
-        'keychain': 5, 'keychains': 5, 'keyring': 5, 'key chain': 5, 'key ring': 5,
-        'key cover': 5, 'keycover': 5, 'key holder': 5, 'key hanger': 5, 'anahtar*': 5,
-        'llavero': 5, 'porta chiavi': 5, 'portachiavi': 5, 'chiavi': 4, 'key': 2, 'keys': 2,
+        # Tür kelimeleri konudan baskın gelsin: "Eiffel Tower keychain", "Pikachu anahtarlık".
+        'keychain': 9, 'keychains': 9, 'keyring': 9, 'key chain': 9, 'key ring': 9,
+        'key cover': 5, 'keycover': 5, 'key holder': 5, 'key hanger': 5, 'anahtar*': 9,
+        'llavero': 9, 'porta chiavi': 5, 'portachiavi': 5, 'chiavi': 4, 'key': 2, 'keys': 2,
         'kwikset': 4, 'schlage': 4, 'jewelry': 4, 'jewellery': 4, 'taki': 4, 'bracelet': 4,
         'bileklik': 4, 'necklace': 4, 'kolye': 4, 'earring': 4, 'earrings': 4, 'kupe': 3,
         'pendant': 3, 'wearable': 3, 'giyilebilir': 3, 'glasses': 3, 'gozluk': 3,
@@ -205,6 +206,15 @@ KEYWORDS = {
         'photo frame': 4, 'frame': 2, 'cerceve': 3, 'clock': 3, 'saat': 2, 'voronoi': 3,
         'geometric': 2, 'triacontahedron': 3, 'sculptural': 3, 'ornamental': 3,
         'optical illusion': 5,
+        # Mimari maketler ve ünlü yapılar
+        'architecture': 4, 'architectural': 4, 'mimari': 4, 'building': 3, 'bina': 3, 'cathedral': 5,
+        'katedral': 5, 'dom': 3, 'kolner': 2, 'church': 4, 'kilise': 4, 'mosque': 4, 'cami': 4, 'camii': 4,
+        'temple': 4, 'tapinak': 4, 'castle': 4, 'kale': 3, 'kalesi': 3, 'sato': 4, 'palace': 4, 'saray': 3,
+        'sarayi': 3, 'tower': 3, 'kule': 3, 'kulesi': 3, 'lighthouse': 4, 'deniz feneri': 4, 'bridge': 3,
+        'kopru': 3, 'koprusu': 3, 'monument': 4, 'anit': 4, 'aniti': 4, 'landmark': 4, 'skyline': 4,
+        'pyramid': 4, 'piramit': 4, 'colosseum': 5, 'eiffel': 5, 'big ben': 5, 'taj mahal': 5,
+        'notre dame': 5, 'sagrada': 5, 'hagia sophia': 5, 'ayasofya': 5, 'galata': 4, 'minaret': 4,
+        'minare': 4, 'windmill': 4, 'yel degirmeni': 4,
     },
 }
 

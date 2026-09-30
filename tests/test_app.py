@@ -78,6 +78,11 @@ class TokenizeAndClassifyTests(unittest.TestCase):
             'Ratcheted Toothpaste Tube Squeezer': 'home',
             'Christmas Decorations - bauble styles': 'seasonal',
             'Lens Hood Canon': 'tech',
+            'Kölner Dom': 'decor',
+            'Galata Kulesi': 'decor',
+            'Süleymaniye Camii': 'decor',
+            'Drawer tower storage box': 'storage',
+            'Eiffel Tower keychain': 'keychain',
         }
         for title, expected in cases.items():
             with self.subTest(title=title):

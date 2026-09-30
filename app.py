@@ -55,7 +55,7 @@ DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 5000
 DB_VERSION = 2
 # Tarama/sınıflandırma mantığı değiştiğinde artırılır; açılışta katalog yeniden üretilir.
-CATALOG_VERSION = 3
+CATALOG_VERSION = 4
 RENDER_VERSION = 1
 MESH_VERSION = 1
 COMPACT_FORMATS = {'3mf', 'obj', 'ply'}
