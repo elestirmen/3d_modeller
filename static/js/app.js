@@ -1,1855 +1,929 @@
 /**
- * 3D Model Yöneticisi — Frontend JavaScript
- * Three.js ile 3D STL önizleme + thumbnail üretimi
+ * 3D Model Arşivi — galeri uygulaması.
  */
 
-// ─── State ─────────────────────────────────────────────────
+import {
+  $, api, boot, categories, categoryIcon, categoryLabel, categoryStyle, closeMenus, confirmDialog, debounce, esc,
+  fold, formatBytes, formatNumber, formatRelative, icon, isMobile, openMenu, setCsrf, storage, store, toast,
+  toggleTheme,
+} from './core.js';
+import { DetailView } from './detail.js';
+import { openEdit, openLogin, openSettings, openShare, openUpload, renderLockedScreen } from './admin.js';
+
+const PAGE_SIZE = 48;
+const RECENT_DAYS = 30;
+const SORTS = [
+  ['recent', 'Yeni eklenen'],
+  ['name', 'Ada göre (A–Z)'],
+  ['modified', 'Son güncellenen'],
+  ['size', 'Boyuta göre'],
+  ['files', 'Parça sayısına göre'],
+];
+const VIEWS = {
+  all: { label: 'Tüm modeller', icon: 'layout-grid' },
+  featured: { label: 'Öne çıkanlar', icon: 'star' },
+  recent: { label: 'Son eklenenler', icon: 'sparkles' },
+  printed: { label: 'Basılanlar', icon: 'printer' },
+  hidden: { label: 'Gizli modeller', icon: 'eye-off', admin: true },
+  nsfw: { label: '18+ içerik', icon: 'lock', admin: true },
+  nothumb: { label: 'Önizlemesi olmayanlar', icon: 'image', admin: true },
+};
+const FLAGS = [
+  ['multipart', 'Çok parçalı', 'layers'],
+  ['images', 'Görselli', 'image'],
+  ['readme', 'README', 'file-text'],
+  ['license', 'Lisanslı', 'badge-check'],
+  ['cad', 'CAD kaynaklı', 'ruler'],
+  ['gcode', 'G-code', 'printer'],
+  ['source', 'Kaynak bağlantılı', 'globe'],
+];
+
 const state = {
-    models: [],
-    currentFilter: 'all',
-    currentTag: '',
-    currentFormat: '',
-    currentSort: 'name',
-    currentSortDir: localStorage.getItem('sortDir') === 'desc' ? 'desc' : 'asc',
-    currentGroupMode: localStorage.getItem('groupMode') === 'project' ? 'project' : 'folder',
-    currentMakerFilters: {
-        has_readme: false,
-        has_license: false,
-        has_cad: false,
-        has_gcode: false,
-        multipart: false,
-    },
-    searchQuery: '',
-    viewMode: 'grid',
-    selectedModel: null,
-    selectedFilePath: '',
-    // Three.js (modal viewer)
-    scene: null,
-    camera: null,
-    renderer: null,
-    controls: null,
-    currentObject: null,
-    animationId: null,
-    // Thumbnails
-    thumbCache: {},        // modelId -> dataURL
-    thumbQueue: [],        // bekleme kuyruğu
-    thumbBusy: false,
-    thumbScheduled: false,
+  admin: Boolean(boot.admin),
+  models: [],
+  byId: new Map(),
+  stats: {},
+  filters: { q: '', category: null, view: 'all', formats: new Set(), flags: new Set(), tag: null, collection: null },
+  sort: storage('sort', 'recent'),
+  layout: storage('layout', 'grid'),
+  visible: [],
+  rendered: 0,
+  loaded: false,
+  pollTimer: null,
+  pollCount: 0,
+  revealed: new Set(),
+  detailId: null,
+  pushedDetail: false,
 };
 
-const IMAGE_FILE_FORMATS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif']);
-const TEXT_FILE_FORMATS = new Set(['txt', 'md']);
-
-// ─── DOM Refs ──────────────────────────────────────────────
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
-
-const dom = {
-    searchInput: $('#searchInput'),
-    modelGrid: $('#modelGrid'),
-    loadingOverlay: $('#loadingOverlay'),
-    resultCount: $('#resultCount'),
-    sortGroup: $('#sortGroup'),
-    sortDirBtn: $('#sortDirBtn'),
-    groupGroup: $('#groupGroup'),
-    tagSearchInput: $('#tagSearchInput'),
-    btnTheme: $('#btnTheme'),
-    sidebar: $('#sidebar'),
-    sidebarClose: $('#sidebarClose'),
-    sidebarBackdrop: $('#sidebarBackdrop'),
-    tagList: $('#tagList'),
-    formatChips: $('#formatChips'),
-    makerChips: $('#makerChips'),
-    previewModal: $('#previewModal'),
-    modalTitle: $('#modalTitle'),
-    modalPrinted: $('#modalPrinted'),
-    modalFavorite: $('#modalFavorite'),
-    modalClose: $('#modalClose'),
-    viewerContainer: $('#viewerContainer'),
-    viewer3D: $('#viewer3D'),
-    viewerLoading: $('#viewerLoading'),
-    viewerControls: $('#viewerControls'),
-    detailFormat: $('#detailFormat'),
-    detailFormats: $('#detailFormats'),
-    detailSize: $('#detailSize'),
-    detailFileCount: $('#detailFileCount'),
-    detailType: $('#detailType'),
-    detailPrinted: $('#detailPrinted'),
-    detailAssets: $('#detailAssets'),
-    currentTags: $('#currentTags'),
-    tagInput: $('#tagInput'),
-    tagSuggestions: $('#tagSuggestions'),
-    addTagBtn: $('#addTagBtn'),
-    suggestedTags: $('#suggestedTags'),
-    noteInput: $('#noteInput'),
-    saveNoteBtn: $('#saveNoteBtn'),
-    fileList: $('#fileList'),
-    makerInfoSection: $('#makerInfoSection'),
-    makerBadges: $('#makerBadges'),
-    printProfile: $('#printProfile'),
-    readmeExcerpt: $('#readmeExcerpt'),
-    resourceLinks: $('#resourceLinks'),
-    previewGallerySection: $('#previewGallerySection'),
-    previewGallery: $('#previewGallery'),
-    toastContainer: $('#toastContainer'),
-    btnFilters: $('#btnFilters'),
-    btnRescan: $('#btnRescan'),
-    btnRescanLabel: $('#btnRescanLabel'),
-    btnFullRescan: $('#btnFullRescan'),
-    btnFullRescanLabel: $('#btnFullRescanLabel'),
-    viewGrid: $('#viewGrid'),
-    viewList: $('#viewList'),
-    statTotal: $('#statTotal'),
-    statFavorites: $('#statFavorites'),
-    statSize: $('#statSize'),
-    filterAll: $('#filterAll'),
-    filterFav: $('#filterFav'),
+const el = {
+  body: document.body,
+  topActions: $('#topActions'),
+  sidebar: $('#sidebar'),
+  content: $('#content'),
+  search: $('#search'),
+  searchClear: $('#searchClear'),
+  detailDialog: $('#detailDialog'),
+  detailRoot: $('#detailRoot'),
+  menuButton: $('#menuButton'),
 };
 
-// ─── Init ──────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-    // Thumbnail cache'i temizle (yeni render kalitesi)
-    try {
-        const ver = localStorage.getItem('thumbVersion');
-        if (ver !== 'v7') {
-            localStorage.removeItem('thumbCache');
-            localStorage.setItem('thumbVersion', 'v7');
-        } else {
-            const saved = localStorage.getItem('thumbCache');
-            if (saved) state.thumbCache = JSON.parse(saved);
-        }
-    } catch (e) { /* pass */ }
-
-    initTheme();
-    syncSortGroupUI();
-    syncGroupGroupUI();
-    syncSortDirUI();
-
-    loadModels();
-    loadStats();
-    loadTags();
-    bindEvents();
-});
-
-function initTheme() {
-    const saved = localStorage.getItem('theme');
-    if (saved === 'dark') applyTheme('dark');
-}
-
-function applyTheme(theme) {
-    document.documentElement.setAttribute('data-theme', theme);
-    const isDark = theme === 'dark';
-    const sunIcon = dom.btnTheme?.querySelector('.icon-sun');
-    const moonIcon = dom.btnTheme?.querySelector('.icon-moon');
-    if (sunIcon) sunIcon.style.display = isDark ? 'none' : '';
-    if (moonIcon) moonIcon.style.display = isDark ? '' : 'none';
-    if (state.scene) {
-        state.scene.background = new THREE.Color(isDark ? 0x12141f : 0xeceef6);
-    }
-}
-
-function toggleTheme() {
-    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    const next = isDark ? 'light' : 'dark';
-    localStorage.setItem('theme', next);
-    applyTheme(next);
-}
-
-function syncSortGroupUI() {
-    if (!dom.sortGroup) return;
-    dom.sortGroup.querySelectorAll('.toggle-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.sort === state.currentSort);
-    });
-}
-
-function syncGroupGroupUI() {
-    if (!dom.groupGroup) return;
-    dom.groupGroup.querySelectorAll('.toggle-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.group === state.currentGroupMode);
-    });
-}
-
-function syncSortDirUI() {
-    if (!dom.sortDirBtn) return;
-    const isDesc = state.currentSortDir === 'desc';
-    dom.sortDirBtn.querySelector('.icon-asc').style.display = isDesc ? 'none' : '';
-    dom.sortDirBtn.querySelector('.icon-desc').style.display = isDesc ? '' : 'none';
-    dom.sortDirBtn.title = isDesc ? 'Z→A / Büyükten küçüğe' : 'A→Z / Küçükten büyüğe';
-}
-
-// ─── API Helpers ───────────────────────────────────────────
-async function api(url, options = {}) {
-    const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-    const resp = await fetch(url, {
-        headers,
-        ...options,
-    });
-    const contentType = resp.headers.get('content-type') || '';
-    const payload = contentType.includes('application/json')
-        ? await resp.json()
-        : await resp.text();
-
-    if (!resp.ok) {
-        const message = typeof payload === 'object' && payload
-            ? payload.error || payload.message || `HTTP ${resp.status}`
-            : `HTTP ${resp.status}`;
-        throw new Error(message);
-    }
-
-    return payload;
-}
-
-function escapeHtml(value) {
-    return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;',
-    }[char]));
-}
-
-function isMobileViewport() {
-    return window.innerWidth <= 768;
-}
-
-function setSidebarOpen(isOpen) {
-    dom.sidebar.classList.toggle('mobile-open', isOpen);
-    dom.sidebarBackdrop.classList.toggle('visible', isOpen);
-}
-
-function renderResultCount(total) {
-    dom.resultCount.replaceChildren();
-    const strong = document.createElement('strong');
-    strong.textContent = total;
-    dom.resultCount.append(strong, ' model bulundu');
-}
-
-function getFileName(filePath) {
-    return String(filePath).split('\\').pop().split('/').pop();
-}
-
-function getFileFormat(filePath) {
-    const fileName = getFileName(filePath);
-    const lastDot = fileName.lastIndexOf('.');
-    if (lastDot === -1) return '';
-    return fileName.slice(lastDot + 1).toLowerCase();
-}
-
-function buildFileUrl(filePath, options = {}) {
-    const params = new URLSearchParams();
-    if (options.download) params.set('download', '1');
-    const suffix = params.toString() ? `?${params}` : '';
-    return `/api/file/${encodeURIComponent(filePath)}${suffix}`;
-}
-
-function buildPreviewUrl(filePath) {
-    return `/api/preview/${encodeURIComponent(filePath)}`;
-}
-
-function getAllDisplayFiles(model) {
-    return model?.all_files || model?.files || [];
-}
-
-function formatAvailableFormats(formats = []) {
-    const normalized = formats.filter(Boolean).map((format) => String(format).toUpperCase());
-    return normalized.length ? normalized.join(', ') : '—';
-}
-
-function getMakerFlagLabel(flag) {
-    const labels = {
-        has_readme: 'README',
-        has_license: 'Lisans',
-        has_cad: 'CAD',
-        has_gcode: 'G-code',
-        multipart: 'Çok Parça',
-    };
-    return labels[flag] || flag;
-}
-
-function getMakerBadges(model) {
-    const badges = [];
-    if (model?.has_readme) badges.push('README');
-    if (model?.has_license) badges.push('Lisans');
-    if (model?.has_cad) badges.push('CAD');
-    if (model?.has_gcode) badges.push('G-code');
-    if (model?.preview_available) badges.push('Önizleme');
-    return badges;
-}
-
-function getPrintProfileLabel(key) {
-    const labels = {
-        resolution: 'Katman',
-        supports: 'Destek',
-        infill: 'Doluluk',
-        material: 'Malzeme',
-        nozzle: 'Nozul',
-    };
-    return labels[key] || key;
-}
-
-function getCardThumbnailState(model) {
-    if (state.thumbCache[model.id]) {
-        return { kind: 'cached', source: state.thumbCache[model.id] };
-    }
-    if (model.preview_images?.length) {
-        return { kind: 'image', source: buildFileUrl(model.preview_images[0]) };
-    }
-    if (model.main_file_has_embedded_preview && model.main_file) {
-        return { kind: 'image', source: buildPreviewUrl(model.main_file) };
-    }
-
-    const thumbFormat = String(model.main_file_format || model.format || '').toLowerCase();
-    if (thumbFormat === 'stl') {
-        return { kind: 'generated', format: thumbFormat };
-    }
-    return { kind: 'icon', format: thumbFormat };
-}
-
-function renderFileList(files = []) {
-    const modelFiles = new Set(state.selectedModel?.files || []);
-    const items = files.map((filePath) => {
-        const isActive = filePath === state.selectedFilePath;
-        const fileFormat = getFileFormat(filePath).toUpperCase() || 'DOSYA';
-        const fileName = getFileName(filePath);
-        const fileRole = modelFiles.has(filePath) ? 'MODEL' : 'EK';
-        return `
-            <li class="file-item ${isActive ? 'active' : ''}">
-                <button
-                    type="button"
-                    class="file-select"
-                    data-action="select-file"
-                    data-file-path="${escapeHtml(filePath)}"
-                    title="${escapeHtml(filePath)}"
-                >
-                    <span class="file-name">${escapeHtml(fileName)}</span>
-                    <span class="file-format"><span class="file-role">${fileRole}</span>${escapeHtml(fileFormat)}</span>
-                </button>
-                <a
-                    class="file-download"
-                    href="${buildFileUrl(filePath, { download: true })}"
-                    data-action="download-file"
-                    data-file-path="${escapeHtml(filePath)}"
-                >
-                    İndir
-                </a>
-            </li>
-        `;
-    }).join('');
-
-    dom.fileList.innerHTML = items;
-}
-
-function renderPrintedState(model) {
-    const printed = Boolean(model?.printed);
-    dom.modalPrinted.classList.toggle('active', printed);
-    dom.detailPrinted.textContent = printed ? 'Yazdırıldı' : 'Bekliyor';
-}
-
-function setViewerControlsVisible(visible) {
-    dom.viewerControls.hidden = !visible;
-}
-
-function withGroupMode(path) {
-    const separator = path.includes('?') ? '&' : '?';
-    return `${path}${separator}group=${encodeURIComponent(state.currentGroupMode)}`;
-}
-
-function setScanButtonsBusy(isBusy, activeMode = 'incremental') {
-    const buttons = [
-        [dom.btnRescan, dom.btnRescanLabel, 'Yenile', 'incremental'],
-        [dom.btnFullRescan, dom.btnFullRescanLabel, 'Tam Tara', 'full'],
-    ];
-
-    buttons.forEach(([button, label, idleText, buttonMode]) => {
-        if (!button) return;
-        button.disabled = isBusy;
-        button.classList.toggle('spinning', isBusy && activeMode === buttonMode);
-        if (isBusy) {
-            button.setAttribute('aria-busy', activeMode === buttonMode ? 'true' : 'false');
-        } else {
-            button.removeAttribute('aria-busy');
-        }
-        if (label) {
-            label.textContent = isBusy && activeMode === buttonMode ? 'Taranıyor...' : idleText;
-        }
-    });
-}
-
-async function runScan(scanMode = 'incremental') {
-    const normalizedMode = scanMode === 'full' ? 'full' : 'incremental';
-    const activeButton = normalizedMode === 'full' ? dom.btnFullRescan : dom.btnRescan;
-    if (!activeButton || activeButton.disabled) return;
-
-    setScanButtonsBusy(true, normalizedMode);
-    try {
-        const result = await api(withGroupMode(`/api/scan?mode=${normalizedMode}`), { method: 'POST' });
-
-        if (result.mode === 'full') {
-            state.thumbCache = {};
-            localStorage.removeItem('thumbCache');
-        } else {
-            for (const modelId of result.updated_ids || []) {
-                delete state.thumbCache[modelId];
-            }
-            saveThumbCache();
-        }
-
-        await Promise.all([
-            loadModels(),
-            loadStats(),
-            loadTags(),
-        ]);
-
-        if (result.mode === 'full') {
-            toast(`Tam tarama tamamlandı. ${result.total} model var.`, 'success');
-            return;
-        }
-
-        if (result.updated > 0) {
-            toast(`Yeni/değişen kayıtlar işlendi. ${result.updated} model güncellendi.`, 'success');
-            return;
-        }
-
-        toast('Yeni model bulunmadı.', 'info');
-    } catch (e) {
-        toast('Tarama sırasında hata oluştu', 'error');
-    } finally {
-        setScanButtonsBusy(false);
-    }
-}
-
-function getModelTypeLabel(type) {
-    if (type === 'folder') return '📂 Klasör';
-    if (type === 'project') return '📁 Proje';
-    return '📄 Dosya';
-}
-
-function getModelDetailType(type) {
-    if (type === 'folder') return 'Klasör Grubu';
-    if (type === 'project') return 'Proje (Klasör)';
-    return 'Tekil Dosya';
-}
-
-function renderViewerMessage(icon, message) {
-    setViewerControlsVisible(false);
-    dom.viewerLoading.classList.add('visible');
-    dom.viewerLoading.innerHTML = `
-        <div style="text-align: center;">
-            <div style="font-size: 4rem; margin-bottom: 16px;">${icon}</div>
-            <p style="color: var(--text-secondary); font-size: 0.9rem;">
-                ${message}
-            </p>
-        </div>
-    `;
-}
-
-function showSelectedFile(filePath) {
-    if (!state.selectedModel || !filePath) return;
-
-    state.selectedFilePath = filePath;
-    renderFileList(getAllDisplayFiles(state.selectedModel));
-
-    const fileFormat = getFileFormat(filePath) || state.selectedModel.format;
-    dom.detailFormat.textContent = fileFormat.toUpperCase();
-
-    if (fileFormat === 'stl' || fileFormat === '3mf') {
-        showViewerLoading(`${fileFormat.toUpperCase()} model yükleniyor...`);
-        setViewerControlsVisible(true);
-        if (!state.renderer) initViewer();
-        if (fileFormat === 'stl') {
-            loadSTL(buildFileUrl(filePath), filePath);
-        } else {
-            load3MF(buildFileUrl(filePath), filePath);
-        }
-        return;
-    }
-
-    if (IMAGE_FILE_FORMATS.has(fileFormat)) {
-        renderViewerImagePreview(
-            buildFileUrl(filePath),
-            `${getFileName(filePath)} görseli gösteriliyor.`,
-            'Görsel yüklenemedi.',
-        );
-        return;
-    }
-
-    disposeViewer();
-    renderViewerMessage(
-        getFormatIcon(fileFormat),
-        `${fileFormat.toUpperCase()} dosyası seçildi. Etkileşimli 3D önizleme şu an yalnızca STL ve 3MF için mevcut.`,
-    );
-}
-
-// ─── Load Data ─────────────────────────────────────────────
-async function loadModels() {
-    showLoading(true);
-    try {
-        const params = new URLSearchParams();
-        if (state.searchQuery) params.set('q', state.searchQuery);
-        if (state.currentTag) params.set('tag', state.currentTag);
-        if (state.currentFormat) params.set('format', state.currentFormat);
-        if (state.currentSort) params.set('sort', state.currentSort);
-        if (state.currentFilter === 'fav') params.set('fav', '1');
-        Object.entries(state.currentMakerFilters).forEach(([flag, enabled]) => {
-            if (enabled) params.set(flag, '1');
-        });
-        params.set('group', state.currentGroupMode);
-
-        const data = await api(`/api/models?${params}`);
-        state.models = state.currentSortDir === 'desc' ? [...data.models].reverse() : data.models;
-        renderGrid();
-        renderResultCount(data.total);
-    } catch (err) {
-        console.error('Model yüklenemedi:', err);
-        toast('Modeller yüklenirken hata oluştu', 'error');
-    } finally {
-        showLoading(false);
-    }
-}
-
-async function loadStats() {
-    try {
-        const data = await api(withGroupMode('/api/stats'));
-        dom.statTotal.querySelector('.stat-value').textContent = data.total;
-        dom.statFavorites.querySelector('.stat-value').textContent = data.favorites;
-        dom.statSize.querySelector('.stat-value').textContent = data.total_size;
-    } catch (e) { /* pass */ }
-}
-
-async function loadTags() {
-    try {
-        const data = await api(withGroupMode('/api/tags'));
-        renderTags(data.tags);
-    } catch (e) { /* pass */ }
-}
-
-// ─── Render ────────────────────────────────────────────────
-function renderGrid() {
-    if (state.models.length === 0) {
-        dom.modelGrid.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-icon">📂</div>
-                <h3>Model bulunamadı</h3>
-                <p>Arama kriterlerini değiştirmeyi deneyin</p>
-            </div>
-        `;
-        return;
-    }
-
-    dom.modelGrid.innerHTML = state.models.map((m) => {
-        const tags = (m.tags || []).slice(0, 3);
-        const isFav = m.favorite ? 'active' : '';
-        const isPrinted = m.printed ? '<span class="printed-badge">✅ Yazdırıldı</span>' : '';
-        const fileCount = m.file_count > 1 ? `<span class="file-count-badge">${m.file_count} dosya</span>` : '';
-        const displayName = escapeHtml(m.display_name || m.name);
-        const rawName = escapeHtml(m.name || '');
-        const metaType = getModelTypeLabel(m.type);
-
-        // Thumbnail durumunu kontrol et
-        const cached = state.thumbCache[m.id];
-        let thumbContent;
-        if (cached) {
-            thumbContent = `<img src="${cached}" alt="${displayName}" style="width:100%;height:100%;object-fit:contain;">`;
-        } else if (m.format === 'stl') {
-            thumbContent = `<div class="thumb-loading" data-model-id="${m.id}"><div class="mini-spinner"></div><span>Yükleniyor</span></div>`;
-        } else {
-            thumbContent = `<span class="thumb-icon">${getFormatIcon(m.format)}</span>`;
-        }
-
-        return `
-            <div class="model-card" data-id="${m.id}">
-                <div class="card-thumbnail" data-thumb-id="${m.id}" data-format="${escapeHtml(m.format)}">
-                    <span class="format-badge">${escapeHtml(m.format)}</span>
-                    ${fileCount}
-                    ${thumbContent}
-                    ${isPrinted}
-                    <div class="card-favorite ${isFav}" data-action="favorite" role="button" tabindex="0" aria-label="Favori">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-                        </svg>
-                    </div>
-                </div>
-                <div class="card-body">
-                    <div class="card-name" title="${rawName}">${displayName}</div>
-                    <div class="card-meta">
-                        <span>${escapeHtml(m.size_display)}</span>
-                        <span>${metaType}</span>
-                    </div>
-                    <div class="card-tags">
-                        ${tags.map((tag) => `<span class="card-tag">${escapeHtml(tag)}</span>`).join('')}
-                        ${m.tags && m.tags.length > 3 ? `<span class="card-tag">+${m.tags.length - 3}</span>` : ''}
-                    </div>
-                </div>
-            </div>
-        `;
-    }).join('');
-
-    // Thumbnail üretimini başlat (IntersectionObserver ile lazy)
-    setupThumbnailObserver();
-}
-
-function renderTags(tags) {
-    dom.tagList.innerHTML = tags.map(t => `
-        <div class="tag-item ${state.currentTag === t.name ? 'active' : ''}" data-tag="${escapeHtml(t.name)}">
-            <span class="tag-name">${escapeHtml(t.name)}</span>
-            <span class="tag-count">${t.count}</span>
-        </div>
-    `).join('');
-    filterTagList(dom.tagSearchInput?.value || '');
-}
-
-function filterTagList(query) {
-    const q = query.trim().toLowerCase();
-    dom.tagList.querySelectorAll('.tag-item').forEach(item => {
-        const name = (item.dataset.tag || '').toLowerCase();
-        item.style.display = !q || name.includes(q) ? '' : 'none';
-    });
-}
-
-function getFormatIcon(format) {
-    const icons = {
-        stl: '🔷',
-        '3mf': '📦',
-        obj: '🟢',
-        gltf: '🟡',
-        glb: '🟡',
-        fbx: '🟠',
-        ply: '🟣',
-    };
-    return icons[format] || '📄';
-}
-
-// ─── Thumbnail Generation ──────────────────────────────────
-
-// Offscreen thumbnail renderer
-const thumbRenderer = {
-    renderer: null,
-    scene: null,
-    camera: null,
-    loader: null,
-
-    init() {
-        if (this.renderer) return;
-
-        const W = 480, H = 360;
-        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-        this.renderer.setSize(W, H);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        this.renderer.setClearColor(0x000000, 0);  // Saydam — CSS gradient arka plan görünecek
-        this.renderer.outputEncoding = THREE.sRGBEncoding;
-        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.5;
-        this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
-        this.scene = new THREE.Scene();
-        // Arka plan yok — saydam render
-
-        // Camera
-        this.camera = new THREE.PerspectiveCamera(35, W / H, 0.1, 2000);
-
-        // Aydınlatma — stüdyo tarzı, belirgin gölge/kenar
-        const ambient = new THREE.AmbientLight(0xc0c8e0, 0.6);
-        this.scene.add(ambient);
-
-        const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
-        keyLight.position.set(60, 120, 80);
-        keyLight.castShadow = true;
-        this.scene.add(keyLight);
-
-        const fillLight = new THREE.DirectionalLight(0x8899ff, 0.8);
-        fillLight.position.set(-60, 50, -30);
-        this.scene.add(fillLight);
-
-        const rimLight = new THREE.DirectionalLight(0xbb77ff, 0.7);
-        rimLight.position.set(-20, -30, -70);
-        this.scene.add(rimLight);
-
-        const topLight = new THREE.DirectionalLight(0xffffff, 0.5);
-        topLight.position.set(0, 150, 0);
-        this.scene.add(topLight);
-
-        const hemi = new THREE.HemisphereLight(0xddddef, 0x8888aa, 0.5);
-        this.scene.add(hemi);
-
-        this.loader = new THREE.STLLoader();
-    },
-
-    async renderThumbnail(url) {
-        return new Promise((resolve, reject) => {
-            this.init();
-
-            this.loader.load(
-                url,
-                (geometry) => {
-                    // Clear previous meshes AND edge lines
-                    const toRemove = this.scene.children.filter(c => c.isMesh || c.isLineSegments);
-                    toRemove.forEach(m => {
-                        this.scene.remove(m);
-                        m.geometry.dispose();
-                        if (m.material) m.material.dispose();
-                    });
-
-                    geometry.computeVertexNormals();
-
-                    const material = new THREE.MeshPhysicalMaterial({
-                        color: 0x4a50c8,
-                        metalness: 0.15,
-                        roughness: 0.3,
-                        clearcoat: 0.6,
-                        clearcoatRoughness: 0.15,
-                        reflectivity: 0.6,
-                    });
-
-                    const mesh = new THREE.Mesh(geometry, material);
-
-                    // Center and scale
-                    geometry.computeBoundingBox();
-                    const box = geometry.boundingBox;
-                    const center = new THREE.Vector3();
-                    box.getCenter(center);
-                    geometry.translate(-center.x, -center.y, -center.z);
-
-                    const size = new THREE.Vector3();
-                    box.getSize(size);
-                    const maxDim = Math.max(size.x, size.y, size.z);
-                    const scale = 70 / maxDim;
-                    mesh.scale.set(scale, scale, scale);
-
-                    // Position on ground
-                    geometry.computeBoundingBox();
-                    mesh.position.y = -geometry.boundingBox.min.y * scale;
-
-                    this.scene.add(mesh);
-
-                    // Edge wireframe overlay — kenarları belirginleştirir
-                    const edgesGeo = new THREE.EdgesGeometry(geometry, 30);
-                    const edgeMat = new THREE.LineBasicMaterial({
-                        color: 0x2a2e80,
-                        transparent: true,
-                        opacity: 0.25,
-                        linewidth: 1,
-                    });
-                    const edges = new THREE.LineSegments(edgesGeo, edgeMat);
-                    edges.scale.copy(mesh.scale);
-                    edges.position.copy(mesh.position);
-                    this.scene.add(edges);
-
-                    // Camera — closer angle for better visibility
-                    const dist = maxDim * scale * 1.7;
-                    this.camera.position.set(dist * 0.6, dist * 0.45, dist * 0.75);
-                    this.camera.lookAt(0, (size.y * scale) / 5, 0);
-
-                    // Render
-                    this.renderer.render(this.scene, this.camera);
-                    const dataURL = this.renderer.domElement.toDataURL('image/webp', 0.85);
-
-                    // Clean up mesh + edges
-                    this.scene.remove(mesh);
-                    this.scene.remove(edges);
-                    geometry.dispose();
-                    material.dispose();
-                    edgesGeo.dispose();
-                    edgeMat.dispose();
-
-                    resolve(dataURL);
-                },
-                undefined,
-                (error) => {
-                    reject(error);
-                }
-            );
-        });
-    }
-};
-
-function setupThumbnailObserver() {
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                const el = entry.target;
-                const modelId = el.dataset.thumbId;
-                const format = el.dataset.format;
-
-                if (format === 'stl' && !state.thumbCache[modelId]) {
-                    queueThumbnail(modelId);
-                }
-                observer.unobserve(el);
-            }
-        });
-    }, {
-        rootMargin: '200px',
-        threshold: 0
-    });
-
-    document.querySelectorAll('.card-thumbnail[data-format="stl"]').forEach(el => {
-        if (!state.thumbCache[el.dataset.thumbId]) {
-            observer.observe(el);
-        }
-    });
-}
-
-function queueThumbnail(modelId) {
-    if (state.thumbQueue.includes(modelId)) return;
-    state.thumbQueue.push(modelId);
-    scheduleThumbQueue();
-}
-
-function scheduleThumbQueue() {
-    if (state.thumbScheduled) return;
-    state.thumbScheduled = true;
-
-    const run = () => {
-        state.thumbScheduled = false;
-        processThumbQueue();
-    };
-
-    if ('requestIdleCallback' in window) {
-        window.requestIdleCallback(run, { timeout: 150 });
-        return;
-    }
-
-    setTimeout(run, 32);
-}
-
-function waitForIdle(timeout = 100) {
-    return new Promise((resolve) => {
-        if ('requestIdleCallback' in window) {
-            window.requestIdleCallback(() => resolve(), { timeout });
-            return;
-        }
-
-        setTimeout(resolve, Math.min(timeout, 32));
-    });
-}
-
-async function processThumbQueue() {
-    if (state.thumbBusy || state.thumbQueue.length === 0) return;
-    state.thumbBusy = true;
-
-    while (state.thumbQueue.length > 0) {
-        const modelId = state.thumbQueue.shift();
-        if (state.thumbCache[modelId]) continue;
-
-        const model = state.models.find(m => m.id === modelId);
-        if (!model) continue;
-
-        const filePath = model.main_file || model.path;
-        const url = `/api/file/${encodeURIComponent(filePath)}`;
-
-        try {
-            const dataURL = await thumbRenderer.renderThumbnail(url);
-            state.thumbCache[modelId] = dataURL;
-
-            // DOM'daki thumbnail'ı güncelle
-            const thumbEl = document.querySelector(`.card-thumbnail[data-thumb-id="${modelId}"]`);
-            if (thumbEl) {
-                const loading = thumbEl.querySelector('.thumb-loading');
-                if (loading) {
-                    const img = document.createElement('img');
-                    img.src = dataURL;
-                    img.alt = model.display_name || model.name;
-                    img.style.cssText = 'width:100%;height:100%;object-fit:contain;';
-                    img.style.animation = 'fadeIn 0.3s ease';
-                    loading.replaceWith(img);
-                }
-            }
-
-            // Her 10 thumbnail'da bir localStorage'a kaydet
-            if (Object.keys(state.thumbCache).length % 10 === 0) {
-                saveThumbCache();
-            }
-        } catch (e) {
-            console.warn(`Thumbnail üretilemedi: ${modelId}`, e);
-            // Hata durumunda fallback icon göster
-            const thumbEl = document.querySelector(`.card-thumbnail[data-thumb-id="${modelId}"]`);
-            if (thumbEl) {
-                const loading = thumbEl.querySelector('.thumb-loading');
-                if (loading) {
-                    loading.innerHTML = '<span class="thumb-icon">🔷</span>';
-                }
-            }
-        }
-
-        // Bir sonraki thumbnail için kısa bekleme (UI'ı bloklamayalım)
-        await waitForIdle(120);
-    }
-
-    state.thumbBusy = false;
-    saveThumbCache();
-}
-
-function saveThumbCache() {
-    try {
-        // localStorage sınırını aşmamak için en fazla 200 thumbnail sakla
-        const keys = Object.keys(state.thumbCache);
-        if (keys.length > 200) {
-            const toRemove = keys.slice(0, keys.length - 200);
-            toRemove.forEach(k => delete state.thumbCache[k]);
-        }
-        localStorage.setItem('thumbCache', JSON.stringify(state.thumbCache));
-    } catch (e) {
-        // localStorage dolmuş olabilir, cache'i temizle
-        console.warn('Thumbnail cache kaydedilemedi, temizleniyor...');
-        localStorage.removeItem('thumbCache');
-    }
-}
-
-// ─── Events ────────────────────────────────────────────────
-function bindEvents() {
-    // Arama
-    let debounceTimer;
-    dom.searchInput.addEventListener('input', () => {
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-            state.searchQuery = dom.searchInput.value;
-            loadModels();
-        }, 300);
-    });
-
-    // Klavye kısayolları ve navigasyon
-    document.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-            e.preventDefault();
-            dom.searchInput.focus();
-            return;
-        }
-        if (e.key === 'Escape' && dom.previewModal.classList.contains('visible')) {
-            closePreview();
-            return;
-        }
-        if (e.key === 'Escape' && dom.sidebar.classList.contains('mobile-open')) {
-            setSidebarOpen(false);
-            return;
-        }
-        // Model grid ok tuşu navigasyonu
-        if (['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
-            const focused = document.activeElement;
-            if (!focused?.classList.contains('model-card')) return;
-            e.preventDefault();
-            const cards = [...dom.modelGrid.querySelectorAll('.model-card')];
-            const idx = cards.indexOf(focused);
-            if (idx === -1) return;
-            const cols = Math.round(dom.modelGrid.clientWidth / (focused.offsetWidth + 16)) || 1;
-            const delta = (e.key === 'ArrowRight') ? 1
-                : (e.key === 'ArrowLeft') ? -1
-                : (e.key === 'ArrowDown') ? cols
-                : -cols;
-            const next = cards[idx + delta];
-            if (next) next.focus();
-        }
-    });
-
-    // Kart klavye ile açma (Enter)
-    dom.modelGrid.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            const card = e.target.closest('.model-card');
-            if (card) openPreview(card.dataset.id);
-        }
-    });
-
-    // Dark mod toggle
-    dom.btnTheme?.addEventListener('click', toggleTheme);
-
-    // Sıralama toggle grubu
-    dom.sortGroup?.addEventListener('click', (e) => {
-        const btn = e.target.closest('.toggle-btn');
-        if (!btn) return;
-        state.currentSort = btn.dataset.sort;
-        syncSortGroupUI();
-        loadModels();
-        if (isMobileViewport()) setSidebarOpen(false);
-    });
-
-    // Sıralama yönü
-    dom.sortDirBtn?.addEventListener('click', () => {
-        state.currentSortDir = state.currentSortDir === 'asc' ? 'desc' : 'asc';
-        localStorage.setItem('sortDir', state.currentSortDir);
-        syncSortDirUI();
-        loadModels();
-    });
-
-    // Gruplama toggle grubu
-    dom.groupGroup?.addEventListener('click', async (e) => {
-        const btn = e.target.closest('.toggle-btn');
-        if (!btn) return;
-        state.currentGroupMode = btn.dataset.group;
-        localStorage.setItem('groupMode', state.currentGroupMode);
-        syncGroupGroupUI();
-        closePreview();
-        await loadModels();
-        loadStats();
-        loadTags();
-        if (isMobileViewport()) setSidebarOpen(false);
-    });
-
-    // Etiket arama
-    dom.tagSearchInput?.addEventListener('input', () => {
-        filterTagList(dom.tagSearchInput.value);
-    });
-
-    // Format filtreleri
-    dom.formatChips.addEventListener('click', (e) => {
-        const chip = e.target.closest('.chip');
-        if (!chip) return;
-        dom.formatChips.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-        chip.classList.add('active');
-        state.currentFormat = chip.dataset.format || '';
-        loadModels();
-        if (isMobileViewport()) setSidebarOpen(false);
-    });
-
-    // Tümü / Favoriler filtresi
-    dom.filterAll.addEventListener('click', () => {
-        state.currentFilter = 'all';
-        dom.filterAll.classList.add('active');
-        dom.filterFav.classList.remove('active');
-        loadModels();
-        if (isMobileViewport()) setSidebarOpen(false);
-    });
-    dom.filterFav.addEventListener('click', () => {
-        state.currentFilter = 'fav';
-        dom.filterFav.classList.add('active');
-        dom.filterAll.classList.remove('active');
-        loadModels();
-        if (isMobileViewport()) setSidebarOpen(false);
-    });
-
-    dom.tagList.addEventListener('click', (e) => {
-        const item = e.target.closest('.tag-item');
-        if (!item) return;
-        filterByTag(item.dataset.tag || '');
-        if (isMobileViewport()) setSidebarOpen(false);
-    });
-
-    dom.modelGrid.addEventListener('click', (e) => {
-        const favoriteButton = e.target.closest('[data-action="favorite"]');
-        if (favoriteButton) {
-            const card = favoriteButton.closest('.model-card');
-            if (card) toggleFavorite(card.dataset.id);
-            return;
-        }
-
-        const card = e.target.closest('.model-card');
-        if (card) openPreview(card.dataset.id);
-    });
-
-    dom.fileList.addEventListener('click', (e) => {
-        const selectButton = e.target.closest('[data-action="select-file"]');
-        if (selectButton) {
-            showSelectedFile(selectButton.dataset.filePath || '');
-        }
-    });
-
-    dom.currentTags.addEventListener('click', (e) => {
-        const removeButton = e.target.closest('.remove-tag');
-        if (removeButton) {
-            removeTag(removeButton.dataset.tag || '');
-        }
-    });
-
-    dom.suggestedTags.addEventListener('click', (e) => {
-        const suggestButton = e.target.closest('.suggest-tag');
-        if (suggestButton) {
-            addSuggestedTag(suggestButton.dataset.tag || '');
-        }
-    });
-
-    // Görünüm
-    dom.viewGrid.addEventListener('click', () => {
-        state.viewMode = 'grid';
-        dom.viewGrid.classList.add('active');
-        dom.viewList.classList.remove('active');
-        dom.modelGrid.classList.remove('list-view');
-    });
-    dom.viewList.addEventListener('click', () => {
-        state.viewMode = 'list';
-        dom.viewList.classList.add('active');
-        dom.viewGrid.classList.remove('active');
-        dom.modelGrid.classList.add('list-view');
-    });
-
-    // Yeniden tara
-    dom.btnRescan.addEventListener('click', () => {
-        runScan('incremental');
-    });
-
-    dom.btnFullRescan?.addEventListener('click', () => {
-        runScan('full');
-    });
-
-    // Modal kapat
-    dom.modalClose.addEventListener('click', closePreview);
-    dom.previewModal.addEventListener('click', (e) => {
-        if (e.target === dom.previewModal) closePreview();
-    });
-
-    dom.btnFilters?.addEventListener('click', () => setSidebarOpen(true));
-    dom.sidebarClose?.addEventListener('click', () => setSidebarOpen(false));
-    dom.sidebarBackdrop?.addEventListener('click', () => setSidebarOpen(false));
-    window.addEventListener('resize', () => {
-        if (!isMobileViewport()) setSidebarOpen(false);
-    });
-
-    // Modal yazdırıldı
-    dom.modalPrinted.addEventListener('click', () => {
-        if (state.selectedModel) togglePrinted(state.selectedModel.id);
-    });
-
-    // Modal favori
-    dom.modalFavorite.addEventListener('click', () => {
-        if (state.selectedModel) toggleFavorite(state.selectedModel.id);
-    });
-
-    // Etiket ekle
-    dom.addTagBtn.addEventListener('click', addTag);
-    dom.tagInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') addTag();
-    });
-
-    // Not kaydet
-    dom.saveNoteBtn.addEventListener('click', saveNote);
-}
-
-// ─── Actions ───────────────────────────────────────────────
-function updateModelState(modelId, changes) {
-    const model = state.models.find((item) => item.id === modelId);
-    if (model) Object.assign(model, changes);
-    if (state.selectedModel?.id === modelId) {
-        Object.assign(state.selectedModel, changes);
-    }
-}
-
-function filterByTag(tagName) {
-    if (state.currentTag === tagName) {
-        state.currentTag = '';
+// ─── Veri ───────────────────────────────────────────────────────────
+
+async function loadLibrary({ quiet = false } = {}) {
+  try {
+    const data = await api('/api/library');
+    const previous = state.byId;
+    state.models = data.models;
+    state.byId = new Map(data.models.map((model) => [model.id, model]));
+    state.stats = data.stats;
+    state.loaded = true;
+    const sameSet = quiet && previous.size === state.byId.size && [...state.byId.keys()].every((id) => previous.has(id));
+    if (sameSet) {
+      patchCards(previous);
+      renderSidebar();
     } else {
-        state.currentTag = tagName;
+      render();
     }
-    loadModels();
-    loadTags();
-}
-
-async function toggleFavorite(modelId) {
-    try {
-        const data = await api(`/api/models/${modelId}/favorite`, { method: 'POST' });
-        updateModelState(modelId, { favorite: data.favorite });
-        dom.modalFavorite.classList.toggle('active', Boolean(state.selectedModel?.favorite));
-        await loadModels();
-
-        loadStats();
-        toast(data.favorite ? '⭐ Favorilere eklendi' : 'Favorilerden çıkarıldı', 'info');
-    } catch (e) {
-        toast('Favori güncellenemedi', 'error');
+    schedulePoll(data.pending);
+    return data;
+  } catch (error) {
+    if (error.status === 401) {
+      renderLocked();
+      return null;
     }
-}
-
-async function togglePrinted(modelId) {
-    try {
-        const data = await api(`/api/models/${modelId}/printed`, { method: 'POST' });
-        updateModelState(modelId, { printed: data.printed });
-        renderPrintedState(state.selectedModel || state.models.find((item) => item.id === modelId));
-        renderGrid();
-        loadStats();
-        toast(data.printed ? 'Yazdırıldı olarak işaretlendi' : 'Yazdırıldı işareti kaldırıldı', 'info');
-    } catch (e) {
-        toast('Yazdırıldı durumu güncellenemedi', 'error');
+    if (!quiet) {
+      el.content.innerHTML = `<div class="empty"><div class="empty-art">${icon('triangle-alert', 'icon-xl')}</div><h3>Arşiv yüklenemedi</h3><p>${esc(error.message)}</p><button class="btn" data-action="reload">${icon('refresh-cw')}Tekrar dene</button></div>`;
     }
+    return null;
+  }
 }
 
-async function addTag() {
-    const tag = dom.tagInput.value.trim();
-    if (!tag || !state.selectedModel) return;
-
-    const tags = [...(state.selectedModel.tags || [])];
-    if (tags.includes(tag)) {
-        toast('Bu etiket zaten ekli', 'info');
-        return;
+function schedulePoll(pending) {
+  clearTimeout(state.pollTimer);
+  if (!pending) {
+    state.pollCount = 0;
+    return;
+  }
+  state.pollCount += 1;
+  if (state.pollCount > 240) return;
+  const delay = state.pollCount < 12 ? 4000 : 10000;
+  state.pollTimer = setTimeout(() => {
+    if (document.hidden) {
+      document.addEventListener('visibilitychange', () => loadLibrary({ quiet: true }), { once: true });
+      return;
     }
-    tags.push(tag);
-
-    try {
-        await api(`/api/models/${state.selectedModel.id}/tags`, {
-            method: 'POST',
-            body: JSON.stringify({ tags }),
-        });
-        updateModelState(state.selectedModel.id, { tags });
-        renderModalTags();
-        renderSuggestedTags();
-        dom.tagInput.value = '';
-        await loadModels();
-        loadTags();
-        toast(`"${tag}" etiketi eklendi`, 'success');
-    } catch (e) {
-        toast('Etiket eklenemedi', 'error');
-    }
+    loadLibrary({ quiet: true });
+  }, delay);
 }
 
-async function removeTag(tag) {
-    if (!state.selectedModel) return;
-    const tags = (state.selectedModel.tags || []).filter(t => t !== tag);
-    try {
-        await api(`/api/models/${state.selectedModel.id}/tags`, {
-            method: 'POST',
-            body: JSON.stringify({ tags }),
-        });
-        updateModelState(state.selectedModel.id, { tags });
-        renderModalTags();
-        renderSuggestedTags();
-        await loadModels();
-        loadTags();
-        toast(`"${tag}" etiketi kaldırıldı`, 'info');
-    } catch (e) {
-        toast('Etiket kaldırılamadı', 'error');
-    }
+function allTags() {
+  const counts = new Map();
+  for (const model of state.models) {
+    for (const tag of model.tags) counts.set(tag, (counts.get(tag) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'tr'));
 }
 
-async function saveNote() {
-    if (!state.selectedModel) return;
-    const note = dom.noteInput.value;
-    try {
-        await api(`/api/models/${state.selectedModel.id}/note`, {
-            method: 'POST',
-            body: JSON.stringify({ note }),
-        });
-        updateModelState(state.selectedModel.id, { note });
-        toast('Not kaydedildi', 'success');
-    } catch (e) {
-        toast('Not kaydedilemedi', 'error');
-    }
+// ─── Filtreleme ─────────────────────────────────────────────────────
+
+function matchesView(model, view) {
+  switch (view) {
+    case 'featured': return model.featured;
+    case 'printed': return model.printed;
+    case 'recent': return model.added && Date.now() / 1000 - model.added < RECENT_DAYS * 86400;
+    case 'hidden': return model.hidden;
+    case 'nsfw': return model.nsfw;
+    case 'nothumb': return !model.thumb;
+    default: return true;
+  }
 }
 
-// ─── 3D Preview Modal ──────────────────────────────────────
-function openPreview(modelId) {
-    const model = state.models.find(m => m.id === modelId);
-    if (!model) return;
-
-    state.selectedModel = model;
-    dom.previewModal.classList.add('visible');
-    document.body.style.overflow = 'hidden';
-    setSidebarOpen(false);
-
-    // Modal bilgilerini doldur
-    dom.modalTitle.textContent = model.display_name || model.name;
-    renderPrintedState(model);
-    dom.modalFavorite.classList.toggle('active', model.favorite);
-    dom.detailFormat.textContent = model.format.toUpperCase();
-    dom.detailSize.textContent = model.size_display;
-    dom.detailFileCount.textContent = model.file_count;
-    dom.detailType.textContent = getModelDetailType(model.type);
-    dom.noteInput.value = model.note || '';
-
-    renderModalTags();
-    renderSuggestedTags();
-    loadTagSuggestions();
-
-    const filePath = model.main_file || model.path;
-    showSelectedFile(filePath);
+function applyFilters() {
+  const { q, category, view, formats, flags, tag, collection } = state.filters;
+  const terms = fold(q).split(/\s+/).filter(Boolean);
+  let list = state.models.filter((model) => {
+    if (category && model.category !== category) return false;
+    if (!matchesView(model, view)) return false;
+    if (tag && !model.tags.includes(tag)) return false;
+    if (collection && model.collectionId !== collection) return false;
+    if (formats.size && !model.formats.some((format) => formats.has(format))) return false;
+    for (const flag of flags) if (!model.flags[flag]) return false;
+    if (terms.length && !terms.every((term) => model.search.includes(term))) return false;
+    return true;
+  });
+  const collator = new Intl.Collator('tr', { sensitivity: 'base', numeric: true });
+  const sorters = {
+    recent: (a, b) => (b.added || 0) - (a.added || 0),
+    name: (a, b) => collator.compare(a.title, b.title),
+    modified: (a, b) => (b.modified || 0) - (a.modified || 0),
+    size: (a, b) => b.size - a.size,
+    files: (a, b) => b.fileCount - a.fileCount,
+  };
+  list = list.sort(sorters[state.sort] || sorters.recent);
+  if (terms.length && state.sort === 'recent') {
+    const titleHit = (model) => terms.every((term) => fold(model.title).includes(term));
+    list = [...list.filter(titleHit), ...list.filter((model) => !titleHit(model))];
+  }
+  state.visible = list;
 }
 
-function closePreview() {
-    dom.previewModal.classList.remove('visible');
-    document.body.style.overflow = '';
-    state.selectedModel = null;
-    state.selectedFilePath = '';
-    setViewerControlsVisible(true);
-    disposeViewer();
-    renderGrid();
+function hasActiveFilters() {
+  const f = state.filters;
+  return Boolean(f.q || f.category || f.view !== 'all' || f.formats.size || f.flags.size || f.tag || f.collection);
 }
 
-function renderModalTags() {
-    const tags = state.selectedModel?.tags || [];
-    dom.currentTags.innerHTML = tags.map(t => `
-        <span class="editable-tag">
-            ${escapeHtml(t)}
-            <span class="remove-tag" data-tag="${escapeHtml(t)}">×</span>
-        </span>
-    `).join('');
+function setFilter(changes, { keepScroll = false } = {}) {
+  Object.assign(state.filters, changes);
+  syncUrl();
+  render();
+  if (!keepScroll) window.scrollTo({ top: 0, behavior: 'smooth' });
+  if (isMobile()) setSidebar(false);
 }
 
-function renderSuggestedTags() {
-    const model = state.selectedModel;
-    if (!model) return;
-    const existing = new Set(model.tags || []);
-    const suggested = (model.suggested_tags || []).filter(t => !existing.has(t));
-
-    if (suggested.length === 0) {
-        dom.suggestedTags.innerHTML = '';
-        return;
-    }
-    dom.suggestedTags.innerHTML = '<span style="font-size:0.72rem;color:var(--text-muted)">Önerilen:</span> ' +
-        suggested.map(t => `<span class="suggest-tag" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`).join('');
+function clearFilters() {
+  state.filters = { q: '', category: null, view: 'all', formats: new Set(), flags: new Set(), tag: null, collection: null };
+  el.search.value = '';
+  syncUrl();
+  render();
 }
 
-async function addSuggestedTag(tag) {
-    if (!state.selectedModel) return;
-    const tags = [...(state.selectedModel.tags || []), tag];
-    try {
-        await api(`/api/models/${state.selectedModel.id}/tags`, {
-            method: 'POST',
-            body: JSON.stringify({ tags }),
-        });
-        updateModelState(state.selectedModel.id, { tags });
-        renderModalTags();
-        renderSuggestedTags();
-        await loadModels();
-        loadTags();
-        toast(`"${tag}" etiketi eklendi`, 'success');
-    } catch (e) {
-        toast('Etiket eklenemedi', 'error');
-    }
+function syncUrl() {
+  const params = new URLSearchParams();
+  const f = state.filters;
+  if (f.q) params.set('q', f.q);
+  if (f.category) params.set('kategori', f.category);
+  if (f.view !== 'all') params.set('gorunum', f.view);
+  if (f.tag) params.set('etiket', f.tag);
+  if (f.collection) params.set('koleksiyon', f.collection);
+  if (f.formats.size) params.set('format', [...f.formats].join(','));
+  if (f.flags.size) params.set('ozellik', [...f.flags].join(','));
+  const query = params.toString();
+  const base = state.detailId ? `/m/${state.detailId}` : '/';
+  history.replaceState(history.state, '', query ? `${base}?${query}` : base);
 }
 
-async function loadTagSuggestions() {
-    try {
-        const data = await api(withGroupMode('/api/tags'));
-        dom.tagSuggestions.replaceChildren();
-        data.tags.forEach((tag) => {
-            const option = document.createElement('option');
-            option.value = tag.name;
-            dom.tagSuggestions.appendChild(option);
-        });
-    } catch (e) { /* pass */ }
+function readUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const f = state.filters;
+  f.q = params.get('q') || '';
+  f.category = categories.some((item) => item.key === params.get('kategori')) ? params.get('kategori') : null;
+  f.view = VIEWS[params.get('gorunum')] ? params.get('gorunum') : 'all';
+  f.tag = params.get('etiket') || null;
+  f.collection = params.get('koleksiyon') || null;
+  f.formats = new Set((params.get('format') || '').split(',').filter(Boolean));
+  f.flags = new Set((params.get('ozellik') || '').split(',').filter(Boolean));
+  el.search.value = f.q;
 }
 
-// ─── Three.js Modal Viewer ─────────────────────────────────
-function initViewer() {
-    disposeViewer();
+// ─── Çizim ──────────────────────────────────────────────────────────
 
-    const container = dom.viewerContainer;
-    const canvas = dom.viewer3D;
-
-    state.scene = new THREE.Scene();
-    state.scene.background = new THREE.Color(0xeceef6);
-
-    const aspect = container.clientWidth / container.clientHeight;
-    state.camera = new THREE.PerspectiveCamera(50, aspect, 0.1, 2000);
-    state.camera.position.set(0, 80, 150);
-
-    state.renderer = new THREE.WebGLRenderer({
-        canvas: canvas,
-        antialias: true,
-    });
-    state.renderer.setSize(container.clientWidth, container.clientHeight);
-    state.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    state.renderer.shadowMap.enabled = true;
-    state.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    state.renderer.outputEncoding = THREE.sRGBEncoding;
-    state.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    state.renderer.toneMappingExposure = 1.3;
-
-    // Lights
-    const ambientLight = new THREE.AmbientLight(0x808090, 0.7);
-    state.scene.add(ambientLight);
-
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-    dirLight.position.set(50, 100, 80);
-    dirLight.castShadow = true;
-    state.scene.add(dirLight);
-
-    const fillLight = new THREE.DirectionalLight(0x5b5ff7, 0.3);
-    fillLight.position.set(-50, 30, -50);
-    state.scene.add(fillLight);
-
-    const rimLight = new THREE.DirectionalLight(0xa855f7, 0.2);
-    rimLight.position.set(0, -30, -60);
-    state.scene.add(rimLight);
-
-    const hemiLight = new THREE.HemisphereLight(0x8888cc, 0xf0f0ff, 0.4);
-    state.scene.add(hemiLight);
-
-    // Grid
-    const gridHelper = new THREE.GridHelper(200, 40, 0xd0d4e4, 0xe0e4f0);
-    state.scene.add(gridHelper);
-
-    // Controls
-    state.controls = new THREE.OrbitControls(state.camera, state.renderer.domElement);
-    state.controls.enableDamping = true;
-    state.controls.dampingFactor = 0.08;
-    state.controls.enablePan = true;
-    state.controls.autoRotate = true;
-    state.controls.autoRotateSpeed = 1.0;
-
-    const onResize = () => {
-        const w = container.clientWidth;
-        const h = container.clientHeight;
-        state.camera.aspect = w / h;
-        state.camera.updateProjectionMatrix();
-        state.renderer.setSize(w, h);
-    };
-    window.addEventListener('resize', onResize);
-    state._onResize = onResize;
-
-    function animate() {
-        state.animationId = requestAnimationFrame(animate);
-        state.controls.update();
-        state.renderer.render(state.scene, state.camera);
-    }
-    animate();
+function render() {
+  if (state.locked) return;
+  applyFilters();
+  renderTopActions();
+  renderSidebar();
+  renderMain();
+  el.searchClear.hidden = !state.filters.q;
 }
 
-function showViewerLoading(message = '3D model yükleniyor...') {
-    dom.viewerLoading.classList.add('visible');
-    dom.viewerLoading.innerHTML = `<div class="spinner"></div><p>${message}</p>`;
-}
-
-function disposeMaterial(material) {
-    const materials = Array.isArray(material) ? material : [material];
-    materials.filter(Boolean).forEach((entry) => {
-        Object.values(entry).forEach((value) => {
-            if (value && value.isTexture) {
-                value.dispose();
-            }
-        });
-        entry.dispose?.();
-    });
-}
-
-function disposeObject3D(object) {
-    if (!object) return;
-    object.traverse((child) => {
-        child.geometry?.dispose?.();
-        if (child.material) {
-            disposeMaterial(child.material);
-        }
-    });
-}
-
-function clearCurrentObject() {
-    if (!state.currentObject) return;
-    state.scene?.remove(state.currentObject);
-    disposeObject3D(state.currentObject);
-    state.currentObject = null;
-}
-
-function prepareViewerObject(object) {
-    object.traverse((child) => {
-        if (!child.isMesh) return;
-        child.castShadow = true;
-        child.receiveShadow = true;
-        if (child.geometry && !child.geometry.attributes.normal && child.geometry.computeVertexNormals) {
-            child.geometry.computeVertexNormals();
-        }
-    });
-}
-
-function fitViewerObject(object) {
-    const wrapper = new THREE.Group();
-    wrapper.add(object);
-
-    const bounds = new THREE.Box3().setFromObject(object);
-    if (bounds.isEmpty()) {
-        return wrapper;
-    }
-
-    const center = bounds.getCenter(new THREE.Vector3());
-    object.position.sub(center);
-
-    const size = bounds.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z, 1);
-    const scale = 80 / maxDim;
-    wrapper.scale.setScalar(scale);
-
-    const groundedBounds = new THREE.Box3().setFromObject(wrapper);
-    wrapper.position.y = -groundedBounds.min.y;
-
-    return wrapper;
-}
-
-function focusViewerObject(object) {
-    const bounds = new THREE.Box3().setFromObject(object);
-    if (bounds.isEmpty()) return;
-
-    const size = bounds.getSize(new THREE.Vector3());
-    const center = bounds.getCenter(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z, 80);
-    const distance = maxDim * 1.6;
-
-    state.camera.position.set(
-        center.x + distance * 0.6,
-        center.y + distance * 0.5,
-        center.z + distance * 0.8,
-    );
-    state.controls.target.copy(center);
-    state.controls.update();
-}
-
-function setViewerObject(object) {
-    clearCurrentObject();
-    prepareViewerObject(object);
-
-    const framedObject = fitViewerObject(object);
-    state.currentObject = framedObject;
-    state.scene.add(framedObject);
-    focusViewerObject(framedObject);
-
-    dom.viewerLoading.classList.remove('visible');
-}
-
-function renderViewerLoadError(message = 'Model yüklenemedi') {
-    dom.viewerLoading.classList.add('visible');
-    dom.viewerLoading.innerHTML = `
-        <div style="text-align: center; color: var(--text-secondary);">
-            <div style="font-size: 3rem; margin-bottom: 12px;">⚠️</div>
-            <p>${message}</p>
-        </div>
-    `;
-}
-
-function renderViewerImagePreview(imageUrl, message, fallbackMessage) {
-    disposeViewer();
-    setViewerControlsVisible(false);
-    showViewerLoading(message);
-
-    const wrapper = document.createElement('div');
-    wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:12px;max-width:100%;padding:12px;';
-
-    const image = document.createElement('img');
-    image.alt = message;
-    image.style.cssText = 'max-width:min(100%, 560px);max-height:320px;object-fit:contain;border-radius:16px;box-shadow:0 18px 50px rgba(15,23,42,0.18);background:rgba(255,255,255,0.92);';
-
-    const caption = document.createElement('p');
-    caption.textContent = message;
-    caption.style.cssText = 'margin:0;color:var(--text-secondary);font-size:0.9rem;text-align:center;';
-
-    wrapper.append(image, caption);
-
-    image.addEventListener('load', () => {
-        dom.viewerLoading.replaceChildren(wrapper);
-        dom.viewerLoading.classList.add('visible');
-    });
-    image.addEventListener('error', () => {
-        renderViewerLoadError(fallbackMessage);
-    });
-
-    image.src = imageUrl;
-}
-
-function show3MFPreviewFallback(filePath) {
-    if (!filePath || state.selectedFilePath !== filePath) return;
-    renderViewerImagePreview(
-        buildPreviewUrl(filePath),
-        '3D mesh açılamadı. Paketteki gömülü 3MF önizlemesi gösteriliyor.',
-        '3MF modeli açılamadı ve pakette önizleme görseli bulunamadı.',
-    );
-}
-
-function loadSTL(url, filePath) {
-    showViewerLoading('STL model yükleniyor...');
-
-    const loader = new THREE.STLLoader();
-    loader.load(
-        url,
-        (geometry) => {
-            if (state.selectedFilePath !== filePath) return;
-            const material = new THREE.MeshPhysicalMaterial({
-                color: 0x7c80ff,
-                metalness: 0.1,
-                roughness: 0.45,
-                clearcoat: 0.3,
-                clearcoatRoughness: 0.4,
-            });
-
-            const mesh = new THREE.Mesh(geometry, material);
-            setViewerObject(mesh);
-        },
-        undefined,
-        (error) => {
-            if (state.selectedFilePath !== filePath) return;
-            console.error('STL yüklenemedi:', error);
-            renderViewerLoadError('STL modeli yüklenemedi');
-        }
-    );
-}
-
-function load3MF(url, filePath) {
-    showViewerLoading('3MF model yükleniyor...');
-
-    const loader = new THREE.ThreeMFLoader();
-    loader.load(
-        url,
-        (object) => {
-            if (state.selectedFilePath !== filePath) return;
-            if (!object) {
-                show3MFPreviewFallback(filePath);
-                return;
-            }
-
-            setViewerObject(object);
-        },
-        undefined,
-        (error) => {
-            if (state.selectedFilePath !== filePath) return;
-            console.error('3MF yüklenemedi:', error);
-            show3MFPreviewFallback(filePath);
-        }
-    );
-}
-
-function disposeViewer() {
-    if (state.animationId) cancelAnimationFrame(state.animationId);
-    clearCurrentObject();
-    if (state.renderer) {
-        state.renderer.dispose();
-        state.renderer = null;
-    }
-    if (state.controls) {
-        state.controls.dispose();
-        state.controls = null;
-    }
-    if (state._onResize) {
-        window.removeEventListener('resize', state._onResize);
-        state._onResize = null;
-    }
-    state.scene = null;
-    state.camera = null;
-}
-
-// ─── Helpers ───────────────────────────────────────────────
-function renderPrintedState(model) {
-    const printed = Boolean(model?.printed);
-    dom.modalPrinted.classList.toggle('active', printed);
-    dom.detailPrinted.textContent = printed ? 'Yazdırıldı' : 'Bekliyor';
-}
-
-function showSelectedFile(filePath) {
-    if (!state.selectedModel || !filePath) return;
-
-    state.selectedFilePath = filePath;
-    renderFileList(getAllDisplayFiles(state.selectedModel));
-
-    const fileFormat = getFileFormat(filePath) || state.selectedModel.format;
-    dom.detailFormat.textContent = fileFormat.toUpperCase();
-
-    if (fileFormat === 'stl' || fileFormat === '3mf') {
-        showViewerLoading(`${fileFormat.toUpperCase()} model yükleniyor...`);
-        setViewerControlsVisible(true);
-        if (!state.renderer) initViewer();
-        if (fileFormat === 'stl') {
-            loadSTL(buildFileUrl(filePath), filePath);
-        } else {
-            load3MF(buildFileUrl(filePath), filePath);
-        }
-        return;
-    }
-
-    if (IMAGE_FILE_FORMATS.has(fileFormat)) {
-        renderViewerImagePreview(
-            buildFileUrl(filePath),
-            `${getFileName(filePath)} görseli gösteriliyor.`,
-            'Görsel yüklenemedi.',
-        );
-        return;
-    }
-
-    disposeViewer();
-    const message = TEXT_FILE_FORMATS.has(fileFormat)
-        ? `${fileFormat.toUpperCase()} dokümanı seçildi. Dosya listesinden indirerek açabilirsiniz.`
-        : `${fileFormat.toUpperCase()} dosyası seçildi. Etkileşimli 3D önizleme şu an yalnızca STL ve 3MF için mevcut.`;
-    renderViewerMessage(getFormatIcon(fileFormat), message);
-}
-
-function renderGrid() {
-    if (state.models.length === 0) {
-        dom.modelGrid.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-icon">📂</div>
-                <h3>Model bulunamadı</h3>
-                <p>Arama kriterlerini değiştirmeyi deneyin</p>
-            </div>
-        `;
-        return;
-    }
-
-    dom.modelGrid.innerHTML = state.models.map((m) => {
-        const tags = (m.tags || []).slice(0, 3);
-        const isFav = m.favorite ? 'active' : '';
-        const isPrinted = m.printed ? '<span class="printed-badge">✅ Yazdırıldı</span>' : '';
-        const fileCount = m.file_count > 1 ? `<span class="file-count-badge">${m.file_count} dosya</span>` : '';
-        const displayName = escapeHtml(m.display_name || m.name);
-        const rawName = escapeHtml(m.name || '');
-        const metaType = getModelTypeLabel(m.type);
-        const thumbState = getCardThumbnailState(m);
-        const thumbFormat = escapeHtml(m.main_file_format || m.format || '');
-        let thumbContent = `<span class="thumb-icon">${getFormatIcon(m.main_file_format || m.format)}</span>`;
-        if (thumbState.kind === 'cached' || thumbState.kind === 'image') {
-            thumbContent = `<img src="${thumbState.source}" alt="${displayName}" style="width:100%;height:100%;object-fit:contain;">`;
-        } else if (thumbState.kind === 'generated') {
-            thumbContent = `<div class="thumb-loading" data-model-id="${m.id}"><div class="mini-spinner"></div><span>Yükleniyor</span></div>`;
-        }
-        const makerBadges = getMakerBadges(m).slice(0, 3);
-        const assetLabel = m.asset_count ? `<span class="card-support-tag">+${m.asset_count} ek</span>` : '';
-
-        return `
-            <div class="model-card" data-id="${m.id}" tabindex="0" role="button" aria-label="${displayName}">
-                <div class="card-thumbnail" data-thumb-id="${m.id}" data-format="${thumbFormat}" data-thumb-kind="${thumbState.kind}">
-                    <span class="format-badge">${escapeHtml((m.main_file_format || m.format || '').toUpperCase())}</span>
-                    ${fileCount}
-                    ${thumbContent}
-                    ${isPrinted}
-                    <div class="card-favorite ${isFav}" data-action="favorite" role="button" tabindex="0" aria-label="Favori">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-                        </svg>
-                    </div>
-                </div>
-                <div class="card-body">
-                    <div class="card-name" title="${rawName}">${displayName}</div>
-                    <div class="card-meta">
-                        <span>${escapeHtml(m.size_display)}</span>
-                        <span>${metaType}</span>
-                    </div>
-                    <div class="card-supports">
-                        ${makerBadges.map((badge) => `<span class="card-support-tag">${escapeHtml(badge)}</span>`).join('')}
-                        ${assetLabel}
-                    </div>
-                    <div class="card-tags">
-                        ${tags.map((tag) => `<span class="card-tag">${escapeHtml(tag)}</span>`).join('')}
-                        ${m.tags && m.tags.length > 3 ? `<span class="card-tag">+${m.tags.length - 3}</span>` : ''}
-                    </div>
-                </div>
-            </div>
-        `;
-    }).join('');
-
-    setupThumbnailObserver();
-}
-
-function setupThumbnailObserver() {
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach((entry) => {
-            if (!entry.isIntersecting) return;
-            const el = entry.target;
-            const modelId = el.dataset.thumbId;
-            if (el.dataset.thumbKind === 'generated' && !state.thumbCache[modelId]) {
-                queueThumbnail(modelId);
-            }
-            observer.unobserve(el);
-        });
-    }, {
-        rootMargin: '200px',
-        threshold: 0,
-    });
-
-    document.querySelectorAll('.card-thumbnail[data-thumb-kind="generated"]').forEach((el) => {
-        if (!state.thumbCache[el.dataset.thumbId]) {
-            observer.observe(el);
-        }
-    });
-}
-
-function renderMakerDetails(model) {
-    const badges = getMakerBadges(model);
-    dom.makerBadges.innerHTML = badges.length
-        ? badges.map((badge) => `<span class="detail-badge">${escapeHtml(badge)}</span>`).join('')
-        : '<span class="empty-note">Ek maker metadata bulunamadı.</span>';
-
-    const profileEntries = Object.entries(model.print_profile || {});
-    dom.printProfile.innerHTML = profileEntries.map(([key, value]) => `
-        <div class="profile-item">
-            <span>${escapeHtml(getPrintProfileLabel(key))}</span>
-            <strong>${escapeHtml(value)}</strong>
-        </div>
-    `).join('');
-
-    dom.readmeExcerpt.textContent = model.readme_excerpt || '';
-    dom.readmeExcerpt.hidden = !model.readme_excerpt;
-
-    const links = [];
-    if (model.readme_path) {
-        links.push(`<a class="resource-link" href="${buildFileUrl(model.readme_path)}" target="_blank" rel="noreferrer">README</a>`);
-    }
-    if (model.license_path) {
-        links.push(`<a class="resource-link" href="${buildFileUrl(model.license_path)}" target="_blank" rel="noreferrer">Lisans</a>`);
-    }
-    if (model.source_url) {
-        links.push(`<a class="resource-link" href="${escapeHtml(model.source_url)}" target="_blank" rel="noreferrer">Kaynak</a>`);
-    }
-    dom.resourceLinks.innerHTML = links.join('');
-
-    const hasContent = badges.length || profileEntries.length || model.readme_excerpt || links.length;
-    dom.makerInfoSection.hidden = !hasContent;
-}
-
-function renderPreviewGallery(model) {
-    const images = (model.preview_images || []).slice(0, 8);
-    if (!images.length) {
-        dom.previewGallery.innerHTML = '';
-        dom.previewGallerySection.hidden = true;
-        return;
-    }
-
-    dom.previewGallery.innerHTML = images.map((filePath) => `
-        <button type="button" class="preview-thumb" data-file-path="${escapeHtml(filePath)}">
-            <img src="${buildFileUrl(filePath)}" alt="${escapeHtml(getFileName(filePath))}">
+function renderTopActions() {
+  if (state.admin) {
+    el.topActions.innerHTML = `
+      <button type="button" class="btn btn-icon btn-ghost" data-action="theme" aria-label="Temayı değiştir" title="Temayı değiştir">${icon('moon')}</button>
+      <button type="button" class="btn btn-primary" data-action="upload" title="Model yükle (U)">${icon('cloud-upload')}<span class="btn-label">Yükle</span></button>
+      <div class="menu-wrap">
+        <button type="button" class="admin-pill" data-action="admin-menu" aria-haspopup="menu" aria-expanded="false">
+          <span class="admin-avatar">${icon('shield-check')}</span><span class="admin-name">Yönetici</span>${icon('chevron-down', 'icon-xs')}
         </button>
-    `).join('');
-    dom.previewGallerySection.hidden = false;
+      </div>`;
+  } else {
+    el.topActions.innerHTML = `
+      <button type="button" class="btn btn-icon btn-ghost" data-action="theme" aria-label="Temayı değiştir" title="Temayı değiştir">${icon('moon')}</button>
+      <button type="button" class="btn btn-ghost" data-action="login" title="Yönetici girişi">${icon('log-in')}<span class="btn-label">Giriş</span></button>`;
+  }
+  updateThemeIcon();
 }
 
-function openPreview(modelId) {
-    const model = state.models.find((item) => item.id === modelId);
-    if (!model) return;
-
-    state.selectedModel = model;
-    dom.previewModal.classList.add('visible');
-    document.body.style.overflow = 'hidden';
-    setSidebarOpen(false);
-
-    dom.modalTitle.textContent = model.display_name || model.name;
-    renderPrintedState(model);
-    dom.modalFavorite.classList.toggle('active', model.favorite);
-    dom.detailFormat.textContent = String(model.main_file_format || model.format || '').toUpperCase();
-    dom.detailFormats.textContent = formatAvailableFormats(model.available_formats || [model.format]);
-    dom.detailSize.textContent = model.size_display;
-    dom.detailFileCount.textContent = model.file_count;
-    dom.detailType.textContent = getModelDetailType(model.type);
-    dom.detailAssets.textContent = `${model.asset_count || 0} dosya`;
-    dom.noteInput.value = model.note || '';
-
-    renderModalTags();
-    renderSuggestedTags();
-    renderMakerDetails(model);
-    renderPreviewGallery(model);
-    loadTagSuggestions();
-
-    const filePath = model.main_file || model.path;
-    showSelectedFile(filePath);
+function updateThemeIcon() {
+  const button = el.topActions.querySelector('[data-action="theme"]');
+  if (!button) return;
+  const dark = document.documentElement.dataset.theme === 'dark'
+    || (!document.documentElement.dataset.theme && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  button.innerHTML = icon(dark ? 'sun' : 'moon');
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    dom.makerChips?.addEventListener('click', (e) => {
-        const chip = e.target.closest('.chip');
-        if (!chip) return;
-        const flag = chip.dataset.flag;
-        if (!flag) return;
-        state.currentMakerFilters[flag] = !state.currentMakerFilters[flag];
-        chip.classList.toggle('active', state.currentMakerFilters[flag]);
-        loadModels();
-        if (isMobileViewport()) setSidebarOpen(false);
+function countBy(predicate) {
+  let count = 0;
+  for (const model of state.models) if (predicate(model)) count += 1;
+  return count;
+}
+
+function renderSidebar() {
+  const f = state.filters;
+  const categoryCounts = new Map();
+  const formatCounts = new Map();
+  for (const model of state.models) {
+    categoryCounts.set(model.category, (categoryCounts.get(model.category) || 0) + 1);
+    for (const format of model.formats) formatCounts.set(format, (formatCounts.get(format) || 0) + 1);
+  }
+  const views = Object.entries(VIEWS).filter(([, view]) => !view.admin || state.admin);
+  const tags = allTags();
+  const collections = new Map();
+  for (const model of state.models) {
+    if (model.collectionId) collections.set(model.collectionId, { name: model.collection, count: (collections.get(model.collectionId)?.count || 0) + 1 });
+  }
+  const navItem = (active, action, value, iconHtml, label, count, extraClass = '') => `
+    <button type="button" class="nav-item ${extraClass}" data-action="${action}" data-value="${esc(value)}" aria-current="${active}">
+      ${iconHtml}<span class="nav-label">${esc(label)}</span><span class="nav-count">${formatNumber(count)}</span>
+    </button>`;
+
+  const viewItems = views.filter(([key]) => !VIEWS[key].admin).map(([key, view]) => navItem(
+    !f.category && f.view === key && !f.tag && !f.collection,
+    'view', key, `<span class="nav-icon">${icon(view.icon)}</span>`, view.label,
+    key === 'all' ? state.models.length : countBy((model) => matchesView(model, key)),
+  )).join('');
+  const adminItems = views.filter(([key]) => VIEWS[key].admin).map(([key, view]) => navItem(
+    f.view === key, 'view', key, `<span class="nav-icon">${icon(view.icon)}</span>`, view.label, countBy((model) => matchesView(model, key)),
+  )).join('');
+  const categoryItems = categories.map((category) => {
+    const count = categoryCounts.get(category.key) || 0;
+    if (!count && !state.admin) return '';
+    return navItem(
+      f.category === category.key, 'category', category.key,
+      `<span class="cat-dot" style="${categoryStyle(category.key)}">${icon(category.icon)}</span>`,
+      category.label, count, count ? '' : 'is-empty',
+    );
+  }).join('');
+  const formatChips = [...formatCounts.entries()].sort((a, b) => b[1] - a[1]).map(([format, count]) => `
+    <button type="button" class="chip" data-action="format" data-value="${esc(format)}" aria-pressed="${f.formats.has(format)}">${esc(format.toUpperCase())}<span class="count">${count}</span></button>`).join('');
+  const flagChips = FLAGS.map(([key, label]) => {
+    const count = countBy((model) => model.flags[key]);
+    if (!count) return '';
+    return `<button type="button" class="chip" data-action="flag" data-value="${key}" aria-pressed="${f.flags.has(key)}">${esc(label)}<span class="count">${count}</span></button>`;
+  }).join('');
+  const tagChips = tags.slice(0, state.showAllTags ? 200 : 14).map(([tag, count]) => `
+    <button type="button" class="chip" data-action="tag" data-value="${esc(tag)}" aria-pressed="${f.tag === tag}">${esc(tag)}<span class="count">${count}</span></button>`).join('');
+
+  el.sidebar.innerHTML = `
+    <div class="side-section">
+      <h2 class="side-title">Keşfet</h2>
+      ${viewItems}
+    </div>
+    ${state.admin ? `<div class="side-section"><h2 class="side-title">Yönetim</h2>${adminItems}</div>` : ''}
+    <div class="side-section">
+      <h2 class="side-title">Kategoriler</h2>
+      ${categoryItems}
+    </div>
+    ${collections.size ? `
+      <div class="side-section">
+        <h2 class="side-title">Koleksiyonlar</h2>
+        ${[...collections.entries()].map(([id, item]) => navItem(f.collection === id, 'collection', id, `<span class="nav-icon">${icon('layers')}</span>`, item.name, item.count)).join('')}
+      </div>` : ''}
+    <div class="side-section">
+      <h2 class="side-title">Format</h2>
+      <div class="chip-cloud">${formatChips}</div>
+    </div>
+    ${flagChips ? `<div class="side-section"><h2 class="side-title">Özellikler</h2><div class="chip-cloud">${flagChips}</div></div>` : ''}
+    ${tags.length ? `
+      <div class="side-section">
+        <h2 class="side-title">Etiketler ${tags.length > 14 ? `<button type="button" data-action="toggle-tags">${state.showAllTags ? 'Daha az' : `Tümü (${tags.length})`}</button>` : ''}</h2>
+        <div class="chip-cloud">${tagChips}</div>
+      </div>` : ''}
+    <div class="side-footer">
+      <span>${formatNumber(state.stats.total || 0)} model · ${formatNumber(state.stats.files || 0)} dosya · ${esc(state.stats.totalSize || '')}</span>
+      <span>3D Model Arşivi</span>
+    </div>`;
+}
+
+function pageHeading() {
+  const f = state.filters;
+  if (f.category) {
+    return `<span class="cat-dot" style="${categoryStyle(f.category)}">${icon(categoryIcon(f.category))}</span>${esc(categoryLabel(f.category))}`;
+  }
+  if (f.collection) {
+    const model = state.models.find((item) => item.collectionId === f.collection);
+    return `${icon('layers', 'icon-lg')}${esc(model?.collection || 'Koleksiyon')}`;
+  }
+  if (f.tag) return `${icon('tag', 'icon-lg')}${esc(f.tag)}`;
+  if (f.q && f.view === 'all') return `“${esc(f.q)}” için sonuçlar`;
+  return esc(VIEWS[f.view]?.label || 'Tüm modeller');
+}
+
+function activeFilterPills() {
+  const f = state.filters;
+  const pills = [];
+  if (f.q) pills.push(['q', `Arama: ${f.q}`]);
+  if (f.category) pills.push(['category', categoryLabel(f.category)]);
+  if (f.view !== 'all') pills.push(['view', VIEWS[f.view].label]);
+  if (f.tag) pills.push(['tag', `#${f.tag}`]);
+  if (f.collection) pills.push(['collection', 'Koleksiyon']);
+  for (const format of f.formats) pills.push([`format:${format}`, format.toUpperCase()]);
+  for (const flag of f.flags) pills.push([`flag:${flag}`, FLAGS.find(([key]) => key === flag)?.[1] || flag]);
+  if (!pills.length) return '';
+  return `<div class="active-filters">
+    ${pills.map(([key, label]) => `<button type="button" class="chip is-active" data-action="remove-filter" data-value="${esc(key)}">${esc(label)}<span class="chip-remove">${icon('x', 'icon-xs')}</span></button>`).join('')}
+    ${pills.length > 1 ? `<button type="button" class="chip" data-action="clear-filters">Tümünü temizle</button>` : ''}
+  </div>`;
+}
+
+function renderMain() {
+  if (!state.loaded) {
+    el.content.innerHTML = `<div class="page-head"><div><div class="skeleton" style="width:220px;height:30px"></div><div class="skeleton" style="width:160px;height:14px;margin-top:10px"></div></div></div>
+      <div class="grid">${Array.from({ length: 12 }, () => '<div class="skeleton-card"><div class="skeleton skeleton-media"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div></div>').join('')}</div>`;
+    return;
+  }
+  const f = state.filters;
+  const total = state.visible.length;
+  const size = state.visible.reduce((sum, model) => sum + model.size, 0);
+  const featured = state.models.filter((model) => model.featured);
+  const showRail = !hasActiveFilters() && featured.length > 0;
+  const hiddenCount = state.admin ? state.visible.filter((model) => model.public === false).length : 0;
+  const categoryChips = `
+    <div class="mobile-cats">
+      <button type="button" class="chip" data-action="category" data-value="" aria-pressed="${!f.category}">Tümü</button>
+      ${categories.filter((category) => state.models.some((model) => model.category === category.key)).map((category) => `
+        <button type="button" class="chip" data-action="category" data-value="${category.key}" aria-pressed="${f.category === category.key}">${icon(category.icon, 'icon-xs')}${esc(category.label)}</button>`).join('')}
+    </div>`;
+
+  el.content.innerHTML = `
+    ${categoryChips}
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">${pageHeading()}</h1>
+        <p class="page-sub">
+          <span>${icon('box', 'icon-sm')}${formatNumber(total)} model</span>
+          <span>${icon('hard-drive', 'icon-sm')}${esc(formatBytes(size))}</span>
+          ${hiddenCount ? `<span>${icon('eye-off', 'icon-sm')}${formatNumber(hiddenCount)} ziyaretçilere kapalı</span>` : ''}
+        </p>
+      </div>
+      <div class="toolbar">
+        <label class="sr-only" for="sortSelect">Sıralama</label>
+        <select class="select" id="sortSelect" data-action="sort">
+          ${SORTS.map(([key, label]) => `<option value="${key}" ${state.sort === key ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+        <div class="segmented" role="group" aria-label="Görünüm">
+          <button type="button" data-action="layout" data-value="grid" aria-pressed="${state.layout === 'grid'}" title="Izgara">${icon('layout-grid', 'icon-sm')}</button>
+          <button type="button" data-action="layout" data-value="compact" aria-pressed="${state.layout === 'compact'}" title="Sıkı ızgara">${icon('grid-3x3', 'icon-sm')}</button>
+          <button type="button" data-action="layout" data-value="list" aria-pressed="${state.layout === 'list'}" title="Liste">${icon('list', 'icon-sm')}</button>
+        </div>
+      </div>
+    </div>
+    ${activeFilterPills()}
+    ${showRail ? `
+      <section class="rail" aria-label="Öne çıkanlar">
+        <div class="rail-head"><h2 class="rail-title">${icon('star')}Öne çıkanlar</h2>${featured.length > 4 ? `<button type="button" class="btn btn-ghost btn-sm" data-action="view" data-value="featured">Tümünü gör${icon('arrow-right', 'icon-sm')}</button>` : ''}</div>
+        <div class="rail-track scroll-thin">${featured.slice(0, 12).map(cardHtml).join('')}</div>
+      </section>
+      <div class="rail-head"><h2 class="rail-title" style="font-size:15px">${icon('layout-grid')}Tüm modeller</h2></div>` : ''}
+    <div class="grid ${state.layout === 'compact' ? 'is-compact' : ''} ${state.layout === 'list' ? 'is-list' : ''}" id="grid" role="list"></div>
+    <div class="grid-sentinel" id="sentinel"></div>`;
+
+  state.rendered = 0;
+  const grid = $('#grid');
+  if (!total) {
+    grid.innerHTML = `
+      <div class="empty">
+        <div class="empty-art">${icon(state.models.length ? 'search' : 'box', 'icon-xl')}</div>
+        <h3>${state.models.length ? 'Eşleşen model bulunamadı' : 'Arşiv henüz boş'}</h3>
+        <p>${state.models.length ? 'Arama terimini veya filtreleri değiştirmeyi dene.' : state.admin ? 'İlk modelini yükleyerek başla.' : 'Yakında burada modeller olacak.'}</p>
+        ${state.models.length ? `<button type="button" class="btn" data-action="clear-filters">${icon('x')}Filtreleri temizle</button>` : state.admin ? `<button type="button" class="btn btn-primary" data-action="upload">${icon('cloud-upload')}Model yükle</button>` : ''}
+      </div>`;
+    return;
+  }
+  renderMore();
+  observeSentinel();
+  markLoadedImages(el.content);
+}
+
+function renderMore() {
+  const grid = $('#grid');
+  if (!grid) return;
+  const next = state.visible.slice(state.rendered, state.rendered + PAGE_SIZE);
+  grid.insertAdjacentHTML('beforeend', next.map(cardHtml).join(''));
+  state.rendered += next.length;
+  markLoadedImages(grid);
+}
+
+let sentinelObserver = null;
+function observeSentinel() {
+  sentinelObserver?.disconnect();
+  const sentinel = $('#sentinel');
+  if (!sentinel) return;
+  sentinelObserver = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting) && state.rendered < state.visible.length) renderMore();
+  }, { rootMargin: '900px 0px' });
+  sentinelObserver.observe(sentinel);
+}
+
+function markLoadedImages(root) {
+  root.querySelectorAll('.card-media img:not(.is-loaded)').forEach((img) => {
+    if (img.complete && img.naturalWidth) img.classList.add('is-loaded');
+  });
+}
+
+function mediaHtml(model) {
+  if (model.thumb) {
+    return `<img src="${esc(model.thumb)}" alt="" loading="lazy" decoding="async">`;
+  }
+  return `<div class="card-placeholder"><span class="cat-dot" style="${categoryStyle(model.category)}">${icon(categoryIcon(model.category))}</span><span class="fmt">${esc(model.mainFormat.toUpperCase())}</span>${model.thumbPending ? '<span>Önizleme hazırlanıyor…</span>' : ''}</div>`;
+}
+
+function cardHtml(model) {
+  const veil = model.nsfw && !state.revealed.has(model.id);
+  const classes = ['card', veil ? 'nsfw-veil' : '', model.thumbPending && !model.thumb ? 'is-pending' : '', state.admin && model.public === false ? 'is-hidden-model' : ''].join(' ');
+  const formats = model.formats.slice(0, 2).map((format) => format.toUpperCase()).join(' · ');
+  const tags = model.tags.slice(0, 2);
+  return `
+    <article class="${classes}" data-id="${esc(model.id)}" tabindex="0" role="listitem" aria-label="${esc(model.title)}">
+      <div class="card-media" data-media>
+        ${mediaHtml(model)}
+        <div class="card-badges">
+          <div><span class="badge badge-glass">${esc(formats)}</span>${model.fileCount > 1 ? `<span class="badge badge-glass">${model.fileCount} parça</span>` : ''}</div>
+          <div>
+            ${model.featured ? `<span class="badge badge-glass" title="Öne çıkan">${icon('star', 'icon-xs filled')}</span>` : ''}
+            ${model.printed ? `<span class="badge badge-glass" title="Basıldı">${icon('check', 'icon-xs')}</span>` : ''}
+            ${state.admin && model.hidden ? `<span class="badge badge-glass" title="Gizli">${icon('eye-off', 'icon-xs')}</span>` : ''}
+          </div>
+        </div>
+        <div class="card-actions">
+          <button type="button" class="card-action" data-card-action="share" title="Paylaş" aria-label="Paylaş">${icon('share-2', 'icon-sm')}</button>
+          ${state.admin ? `<button type="button" class="card-action ${model.featured ? 'is-starred' : ''}" data-card-action="feature" title="${model.featured ? 'Öne çıkanlardan çıkar' : 'Öne çıkar'}" aria-label="Öne çıkar">${icon('star', 'icon-sm')}</button>` : ''}
+        </div>
+      </div>
+      <div class="card-body">
+        <h3 class="card-title">${esc(model.title)}</h3>
+        <div class="card-meta">
+          <span class="card-cat" style="${categoryStyle(model.category)}">${icon(categoryIcon(model.category))}${esc(categoryLabel(model.category))}</span>
+          <span class="sep"></span><span class="card-size">${esc(model.sizeLabel)}</span>
+          ${model.dims && state.layout === 'list' ? `<span class="sep"></span><span>${esc(model.dims)}</span>` : ''}
+        </div>
+        ${tags.length || model.author ? `<div class="card-tags">${tags.map((tag) => `<span class="badge">${esc(tag)}</span>`).join('')}${model.author && !tags.length ? `<span class="badge">${icon('user-round', 'icon-xs')}${esc(model.author)}</span>` : ''}</div>` : ''}
+      </div>
+    </article>`;
+}
+
+function patchCards(previous) {
+  for (const model of state.models) {
+    const old = previous.get(model.id);
+    if (!old || (old.thumb === model.thumb && old.thumbPending === model.thumbPending)) continue;
+    document.querySelectorAll(`.card[data-id="${CSS.escape(model.id)}"]`).forEach((card) => {
+      const media = card.querySelector('[data-media]');
+      media.querySelectorAll('img, .card-placeholder').forEach((node) => node.remove());
+      media.insertAdjacentHTML('afterbegin', mediaHtml(model));
+      card.classList.toggle('is-pending', model.thumbPending && !model.thumb);
     });
-
-    dom.previewGallery?.addEventListener('click', (e) => {
-        const button = e.target.closest('[data-file-path]');
-        if (!button) return;
-        showSelectedFile(button.dataset.filePath || '');
-    });
-});
-
-function showLoading(visible) {
-    dom.loadingOverlay.classList.toggle('visible', visible);
+  }
 }
 
-function toast(message, type = 'info') {
-    const el = document.createElement('div');
-    el.className = `toast ${type}`;
-    el.textContent = message;
-    dom.toastContainer.appendChild(el);
-    setTimeout(() => el.remove(), 3200);
+function renderLocked() {
+  state.locked = true;
+  el.sidebar.hidden = true;
+  $('#layout').style.gridTemplateColumns = '1fr';
+  el.search.closest('.search').style.visibility = 'hidden';
+  el.menuButton.hidden = true;
+  el.topActions.innerHTML = `<button type="button" class="btn btn-icon btn-ghost" data-action="theme" aria-label="Temayı değiştir" title="Temayı değiştir">${icon('moon')}</button>`;
+  updateThemeIcon();
+  renderLockedScreen(el.content, { onSuccess: () => window.location.reload() });
 }
 
-// CSS animation for thumbnail fade-in
-const styleSheet = document.createElement('style');
-styleSheet.textContent = `@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }`;
-document.head.appendChild(styleSheet);
+// ─── Detay ──────────────────────────────────────────────────────────
+
+let detail = null;
+
+function ensureDetail() {
+  if (detail) return detail;
+  detail = new DetailView({
+    root: el.detailRoot,
+    mode: 'modal',
+    admin: state.admin,
+    onClose: () => closeDetail(),
+    onNavigate: (direction) => navigateDetail(direction),
+    onUpdated: (updated, { quiet } = {}) => {
+      mergeCard(updated);
+      if (!quiet) renderDetail(updated);
+    },
+    onShare: (model) => openShare(model, { admin: state.admin, onChange: () => refreshDetail() }),
+    onEdit: (model) => openEdit(model, { allTags: allTags().map(([tag]) => tag), onSaved: (updated) => { mergeCard(updated); renderDetail(updated); } }),
+    onUpload: (model) => openUpload({ target: model, allTags: allTags().map(([tag]) => tag), onDone: async (_, { open }) => { await loadLibrary({ quiet: true }); if (open) refreshDetail(); } }),
+    onDeleted: (model) => trashModel(model),
+    onOpenModel: (id) => openDetail(id),
+    onTag: (tag) => { closeDetail(); setFilter({ tag, category: null, view: 'all' }); },
+  });
+  return detail;
+}
+
+function mergeCard(updated) {
+  const card = state.byId.get(updated.id);
+  if (!card) return;
+  const fields = ['title', 'category', 'tags', 'featured', 'printed', 'nsfw', 'hidden', 'public', 'author', 'thumb', 'thumbPending', 'search', 'flags'];
+  for (const field of fields) if (field in updated) card[field] = updated[field];
+  applyFilters();
+  renderSidebar();
+  document.querySelectorAll(`.card[data-id="${CSS.escape(updated.id)}"]`).forEach((node) => {
+    node.outerHTML = cardHtml(card);
+  });
+  markLoadedImages(el.content);
+}
+
+function neighbors(id) {
+  const list = state.visible.length ? state.visible : state.models;
+  const index = list.findIndex((model) => model.id === id);
+  return {
+    prev: index > 0 ? list[index - 1].id : null,
+    next: index >= 0 && index < list.length - 1 ? list[index + 1].id : null,
+  };
+}
+
+function similarModels(model) {
+  const tokens = new Set(fold(model.title).split(/[^a-z0-9]+/).filter((token) => token.length > 2));
+  const score = (other) => {
+    let value = 0;
+    if (model.collectionId && other.collectionId === model.collectionId) value += 10;
+    if (other.category === model.category) value += 4;
+    for (const token of fold(other.title).split(/[^a-z0-9]+/)) if (tokens.has(token)) value += 2;
+    for (const tag of other.tags) if (model.tags.includes(tag)) value += 1;
+    return value;
+  };
+  return state.models
+    .filter((other) => other.id !== model.id && !(other.nsfw && !model.nsfw))
+    .map((other) => [score(other), other])
+    .filter(([value]) => value >= 4)
+    .sort((a, b) => b[0] - a[0])
+    .slice(0, 10)
+    .map(([, other]) => other);
+}
+
+function renderDetail(model) {
+  ensureDetail().render(model, { ...neighbors(model.id), similar: similarModels(model) });
+}
+
+async function openDetail(id, { push = true } = {}) {
+  const view = ensureDetail();
+  view.setAdmin(state.admin);
+  if (!el.detailDialog.open) {
+    el.detailRoot.innerHTML = `<div style="display:grid;place-items:center;height:100%"><div class="spinner" style="color:var(--accent)"></div></div>`;
+    el.detailDialog.showModal();
+    document.body.classList.add('is-locked');
+  }
+  const wasOpen = state.detailId !== null;
+  state.detailId = id;
+  if (push) {
+    const url = `/m/${id}${window.location.search}`;
+    if (wasOpen) history.replaceState({ model: id }, '', url);
+    else {
+      history.pushState({ model: id }, '', url);
+      state.pushedDetail = true;
+    }
+  }
+  try {
+    const model = await api(`/api/models/${encodeURIComponent(id)}`);
+    if (state.detailId !== id) return;
+    renderDetail(model);
+    document.title = `${model.title} · ${boot.site?.title || '3D Model Arşivi'}`;
+  } catch (error) {
+    toast(error.message, 'error');
+    closeDetail();
+  }
+}
+
+async function refreshDetail() {
+  if (!state.detailId) return;
+  try {
+    const model = await api(`/api/models/${encodeURIComponent(state.detailId)}`);
+    mergeCard(model);
+    renderDetail(model);
+  } catch { /* yoksay */ }
+}
+
+function navigateDetail(direction) {
+  const { prev, next } = neighbors(state.detailId);
+  const target = direction < 0 ? prev : next;
+  if (target) openDetail(target);
+}
+
+function closeDetail({ fromHistory = false } = {}) {
+  if (!state.detailId) return;
+  state.detailId = null;
+  detail?.deactivate();
+  if (el.detailDialog.open) el.detailDialog.close();
+  document.body.classList.remove('is-locked');
+  document.title = boot.site?.title || '3D Model Arşivi';
+  if (!fromHistory) {
+    if (state.pushedDetail) {
+      state.pushedDetail = false;
+      history.back();
+    } else {
+      syncUrl();
+    }
+  }
+}
+
+async function trashModel(model) {
+  const ok = await confirmDialog({
+    title: 'Model çöp kutusuna taşınsın mı?',
+    message: `“${model.title}” ve dosyaları arşivden kaldırılıp sunucudaki .trash klasörüne taşınacak. Paylaşım bağlantıları iptal olur.`,
+    confirmText: 'Çöp kutusuna taşı',
+    danger: true,
+    iconName: 'trash-2',
+  });
+  if (!ok) return;
+  try {
+    await api(`/api/models/${encodeURIComponent(model.id)}`, { method: 'DELETE' });
+    toast('Model çöp kutusuna taşındı', 'success');
+    closeDetail();
+    await loadLibrary();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+// ─── Oturum ─────────────────────────────────────────────────────────
+
+async function afterLogin() {
+  state.admin = true;
+  toast('Hoş geldin! Yönetici olarak giriş yaptın.', 'success');
+  if (detail) detail.setAdmin(true);
+  await loadLibrary();
+  if (state.detailId) refreshDetail();
+}
+
+async function logout() {
+  try {
+    const result = await api('/api/auth/logout', { method: 'POST' });
+    setCsrf(result.csrf);
+  } catch { /* yoksay */ }
+  state.admin = false;
+  if (detail) detail.setAdmin(false);
+  toast('Çıkış yapıldı', 'info');
+  if (!boot.publicBrowsing) {
+    window.location.href = '/';
+    return;
+  }
+  await loadLibrary();
+  if (state.detailId) {
+    if (state.byId.has(state.detailId)) refreshDetail();
+    else closeDetail();
+  }
+}
+
+function startUpload() {
+  openUpload({
+    allTags: allTags().map(([tag]) => tag),
+    onDone: async (models, { open, silent }) => {
+      await loadLibrary({ quiet: silent });
+      if (open && models[0]) openDetail(models[0].id);
+    },
+  });
+}
+
+function openAdminMenu(trigger) {
+  openMenu(trigger, [
+    { label: 'Model yükle', icon: 'cloud-upload', onClick: startUpload },
+    { label: 'Ayarlar', icon: 'settings', onClick: () => openSettings({ onChanged: () => loadLibrary({ quiet: true }) }) },
+    { label: 'Paylaşım bağlantıları', icon: 'link', onClick: () => openSettings({ initialTab: 'shares' }) },
+    { label: 'Bakım ve önizlemeler', icon: 'wand-sparkles', onClick: () => openSettings({ initialTab: 'maintenance', onChanged: () => loadLibrary({ quiet: true }) }) },
+    { separator: true },
+    { label: 'Çıkış yap', icon: 'log-out', danger: true, onClick: logout },
+  ], { header: '<div class="menu-header"><strong>Yönetici</strong><span>Oturum açık</span></div>' });
+}
+
+// ─── Olaylar ────────────────────────────────────────────────────────
+
+function setSidebar(open) {
+  el.sidebar.classList.toggle('is-open', open);
+  let backdrop = $('.drawer-backdrop');
+  if (open && !backdrop) {
+    backdrop = document.createElement('div');
+    backdrop.className = 'drawer-backdrop';
+    backdrop.addEventListener('click', () => setSidebar(false));
+    document.body.append(backdrop);
+  } else if (!open) {
+    backdrop?.remove();
+  }
+}
+
+function handleAction(target, event) {
+  const { action, value } = target.dataset;
+  const f = state.filters;
+  switch (action) {
+    case 'view': setFilter({ view: value, category: null, tag: null, collection: null }); break;
+    case 'category': setFilter({ category: value && f.category !== value ? value : null, view: 'all', tag: null, collection: null }); break;
+    case 'collection': setFilter({ collection: f.collection === value ? null : value, category: null, view: 'all', tag: null }); break;
+    case 'tag': setFilter({ tag: f.tag === value ? null : value }); break;
+    case 'format': {
+      const formats = new Set(f.formats);
+      if (formats.has(value)) formats.delete(value); else formats.add(value);
+      setFilter({ formats }, { keepScroll: true });
+      break;
+    }
+    case 'flag': {
+      const flags = new Set(f.flags);
+      if (flags.has(value)) flags.delete(value); else flags.add(value);
+      setFilter({ flags }, { keepScroll: true });
+      break;
+    }
+    case 'remove-filter': {
+      if (value === 'q') { el.search.value = ''; setFilter({ q: '' }); } else if (value.startsWith('format:')) {
+        const formats = new Set(f.formats); formats.delete(value.slice(7)); setFilter({ formats });
+      } else if (value.startsWith('flag:')) {
+        const flags = new Set(f.flags); flags.delete(value.slice(5)); setFilter({ flags });
+      } else setFilter({ [value]: value === 'view' ? 'all' : null });
+      break;
+    }
+    case 'clear-filters': clearFilters(); break;
+    case 'toggle-tags': state.showAllTags = !state.showAllTags; renderSidebar(); break;
+    case 'layout': state.layout = value; store('layout', value); renderMain(); break;
+    case 'theme': toggleTheme(); updateThemeIcon(); break;
+    case 'login': openLogin({ onSuccess: afterLogin }); break;
+    case 'upload': startUpload(); break;
+    case 'admin-menu': openAdminMenu(target); break;
+    case 'reload': loadLibrary(); break;
+    default: return false;
+  }
+  event.preventDefault();
+  return true;
+}
+
+function bindEvents() {
+  document.addEventListener('click', (event) => {
+    const cardAction = event.target.closest('[data-card-action]');
+    if (cardAction) {
+      event.stopPropagation();
+      const model = state.byId.get(cardAction.closest('.card').dataset.id);
+      if (cardAction.dataset.cardAction === 'share') {
+        if (state.admin) api(`/api/models/${encodeURIComponent(model.id)}`).then((full) => openShare(full, { admin: true })).catch((error) => toast(error.message, 'error'));
+        else openShare(model, { admin: false });
+      } else if (cardAction.dataset.cardAction === 'feature') {
+        api(`/api/models/${encodeURIComponent(model.id)}`, { method: 'PATCH', body: { favorite: !model.featured } })
+          .then((updated) => { mergeCard(updated); toast(updated.featured ? 'Öne çıkanlara eklendi' : 'Öne çıkanlardan çıkarıldı', 'success', { duration: 1800 }); renderMain(); })
+          .catch((error) => toast(error.message, 'error'));
+      }
+      return;
+    }
+    const actionTarget = event.target.closest('[data-action]');
+    if (actionTarget && !el.detailRoot.contains(actionTarget) && handleAction(actionTarget, event)) return;
+    const card = event.target.closest('.card');
+    if (card && !el.detailRoot.contains(card)) {
+      const model = state.byId.get(card.dataset.id);
+      if (model?.nsfw && !state.revealed.has(model.id)) {
+        state.revealed.add(model.id);
+        card.classList.remove('nsfw-veil');
+      }
+      openDetail(card.dataset.id);
+    }
+  });
+
+  el.content.addEventListener('change', (event) => {
+    if (event.target.matches('[data-action="sort"]')) {
+      state.sort = event.target.value;
+      store('sort', state.sort);
+      render();
+    }
+  });
+
+  el.content.addEventListener('load', (event) => {
+    if (event.target.tagName === 'IMG') event.target.classList.add('is-loaded');
+  }, true);
+  el.content.addEventListener('error', (event) => {
+    if (event.target.tagName === 'IMG' && event.target.closest('.card-media')) {
+      const card = event.target.closest('.card');
+      const model = state.byId.get(card?.dataset.id);
+      if (model) event.target.replaceWith(document.createRange().createContextualFragment(mediaHtml({ ...model, thumb: null })));
+    }
+  }, true);
+
+  const onSearch = debounce(() => {
+    state.filters.q = el.search.value.trim();
+    syncUrl();
+    render();
+  }, 120);
+  el.search.addEventListener('input', () => {
+    el.searchClear.hidden = !el.search.value;
+    onSearch();
+  });
+  el.search.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      el.search.value = '';
+      onSearch();
+      el.search.blur();
+    } else if (event.key === 'Enter' && state.visible[0]) {
+      openDetail(state.visible[0].id);
+    }
+  });
+  el.searchClear.addEventListener('click', () => {
+    el.search.value = '';
+    el.search.focus();
+    onSearch();
+  });
+
+  el.menuButton?.addEventListener('click', () => setSidebar(!el.sidebar.classList.contains('is-open')));
+
+  document.addEventListener('keydown', (event) => {
+    const typing = event.target.closest('input, textarea, select, [contenteditable="true"]');
+    if ((event.key === 'k' && (event.metaKey || event.ctrlKey)) || (event.key === '/' && !typing)) {
+      event.preventDefault();
+      if (el.detailDialog.open) return;
+      el.search.focus();
+      el.search.select();
+      return;
+    }
+    if (typing) return;
+    if (el.detailDialog.open) {
+      if (event.key === 'ArrowLeft') navigateDetail(-1);
+      if (event.key === 'ArrowRight') navigateDetail(1);
+      return;
+    }
+    if (event.key === 'u' && state.admin && !document.querySelector('dialog[open]')) startUpload();
+    if (event.key === 'Enter' && event.target.classList?.contains('card')) openDetail(event.target.dataset.id);
+  });
+
+  el.detailDialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeDetail();
+  });
+  el.detailDialog.addEventListener('click', (event) => {
+    if (event.target === el.detailDialog) closeDetail();
+  });
+
+  window.addEventListener('popstate', () => {
+    const match = window.location.pathname.match(/^\/m\/([^/]+)/);
+    if (match) {
+      openDetail(decodeURIComponent(match[1]), { push: false });
+    } else if (state.detailId) {
+      state.pushedDetail = false;
+      closeDetail({ fromHistory: true });
+    }
+    readUrl();
+    render();
+  });
+
+  window.addEventListener('themechange', updateThemeIcon);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', updateThemeIcon);
+  window.addEventListener('resize', debounce(() => { if (!isMobile()) setSidebar(false); }, 150));
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setSidebar(false); });
+  window.addEventListener('scroll', closeMenus, { passive: true });
+}
+
+// ─── Başlat ─────────────────────────────────────────────────────────
+
+function fitSearchPlaceholder() {
+  el.search.placeholder = window.innerWidth < 640 ? 'Ara…' : 'Model, kategori, etiket veya tasarımcı ara…';
+}
+
+fitSearchPlaceholder();
+window.addEventListener('resize', debounce(fitSearchPlaceholder, 200));
+readUrl();
+bindEvents();
+render();
+if (!boot.publicBrowsing && !state.admin) {
+  renderLocked();
+} else {
+  loadLibrary().then(() => {
+    if (boot.initialModel) {
+      state.pushedDetail = false;
+      openDetail(boot.initialModel, { push: false });
+      state.detailId = boot.initialModel;
+    }
+  });
+}

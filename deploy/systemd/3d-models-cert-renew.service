@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew the 3d-models.perinet.org TLS certificate
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/cloudflare/token.env
+ExecStart=/opt/3d_modeller/deploy/renew-certificate.sh

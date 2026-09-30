@@ -21,6 +21,12 @@
 !.gitattributes
 !.editorconfig
 !requirements.txt
+!/Dockerfile
+!/.dockerignore
+!/deploy/nginx/3d-models.perinet.org.conf
+!/deploy/renew-certificate.sh
+!/deploy/systemd/3d-models-cert-renew.service
+!/deploy/systemd/3d-models-cert-renew.timer
 
 # Python/artifact ve yerel durum dosyalari
 __pycache__/
@@ -35,8 +41,17 @@ env/
 
 # Yerel veritabani ve IDE dosyalari
 db.json
+db.*.json
+.admin.json
+.secret_key
+.server.lock
 .idea/
 .vscode/
+
+# Uygulamanin urettigi yerel veri (onizleme onbellegi, yarim yuklemeler, cop kutusu)
+thumbnails/
+.uploads/
+.trash/
 
 # Buyuk dosyalar ve 3D model formatlari (push timeout onlemek icin)
 *.stl
@@ -70,3 +85,6 @@ db.json
 *.7z
 *.tar
 *.gz
+
+# Arayuz yazi tipleri (yukaridaki genel kurallardan sonra gelmeli)
+!/static/vendor/fonts/*.woff2

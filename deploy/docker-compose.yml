@@ -1,0 +1,27 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: 3d-models-perinet:local
+    container_name: 3d-models-perinet
+    restart: unless-stopped
+    # Dosyalar (yüklemeler, önizlemeler, veritabanı) sunucudaki kullanıcıya ait olsun.
+    user: "1000:1000"
+    environment:
+      MODEL_MANAGER_HOST: 0.0.0.0
+      MODEL_MANAGER_PORT: 5000
+      MODEL_MANAGER_DEBUG: "0"
+      MODEL_MANAGER_WORKERS: "1"
+      MODEL_MANAGER_TRUST_PROXY: "1"
+      MODEL_MANAGER_SECURE_COOKIES: "1"
+      HOME: /tmp
+    volumes:
+      - ..:/app
+    networks:
+      - npm-net
+
+networks:
+  npm-net:
+    external: true
+    name: npm-net

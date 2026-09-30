@@ -1,3 +1,4 @@
+/* Yerel yama (3D Model Arşivi): 3MF Production Extension (p:path) bileşen desteği eklendi. */
 ( function () {
 
 	/**
@@ -478,6 +479,15 @@
 				const componentData = {};
 				componentData[ 'objectId' ] = componentNode.getAttribute( 'objectid' ); // required
 
+				// Yerel yama: 3MF Production Extension — başka model dosyasındaki bileşen (Bambu/Orca/Creality)
+				const componentPath = componentNode.getAttribute( 'p:path' ) || componentNode.getAttribute( 'path' );
+
+				if ( componentPath ) {
+
+					componentData[ 'path' ] = componentPath.replace( /^\//, '' );
+
+				}
+
 				const transform = componentNode.getAttribute( 'transform' );
 
 				if ( transform ) {
@@ -666,6 +676,13 @@
 					const buildItem = {
 						objectId: itemNode.getAttribute( 'objectid' )
 					};
+					const itemPath = itemNode.getAttribute( 'p:path' ) || itemNode.getAttribute( 'path' );
+
+					if ( itemPath ) {
+
+						buildItem[ 'path' ] = itemPath.replace( /^\//, '' );
+
+					}
 					const transform = itemNode.getAttribute( 'transform' );
 
 					if ( transform ) {
@@ -1178,6 +1195,16 @@
 
 			}
 
+			let partModels = null; // Yerel yama: model dosyası → ayrıştırılmış veri
+			const partObjects = {}; // Yerel yama: model dosyası → nesne havuzu
+
+			function objectsForPart( partName ) {
+
+				if ( partObjects[ partName ] === undefined ) partObjects[ partName ] = {};
+				return partObjects[ partName ];
+
+			}
+
 			function buildComposite( compositeData, objects, modelData, textureData ) {
 
 				const composite = new THREE.Group();
@@ -1185,15 +1212,26 @@
 				for ( let j = 0; j < compositeData.length; j ++ ) {
 
 					const component = compositeData[ j ];
-					let build = objects[ component.objectId ];
+					let componentObjects = objects;
+					let componentModel = modelData;
 
-					if ( build === undefined ) {
+					if ( component.path && partModels && partModels[ component.path ] ) {
 
-						buildObject( component.objectId, objects, modelData, textureData );
-						build = objects[ component.objectId ];
+						componentObjects = objectsForPart( component.path );
+						componentModel = partModels[ component.path ];
 
 					}
 
+					let build = componentObjects[ component.objectId ];
+
+					if ( build === undefined ) {
+
+						buildObject( component.objectId, componentObjects, componentModel, textureData );
+						build = componentObjects[ component.objectId ];
+
+					}
+
+					if ( build === undefined ) continue;
 					const object3D = build.clone(); // apply component transform
 
 					const transform = component.transform;
@@ -1216,6 +1254,8 @@
 
 				const objectData = modelData[ 'resources' ][ 'object' ][ objectId ];
 
+				if ( objectData === undefined ) return;
+
 				if ( objectData[ 'mesh' ] ) {
 
 					const meshData = objectData[ 'mesh' ];
@@ -1236,8 +1276,8 @@
 			function buildObjects( data3mf ) {
 
 				const modelsData = data3mf.model;
+				partModels = modelsData;
 				const modelRels = data3mf.modelRels;
-				const objects = {};
 				const modelsKeys = Object.keys( modelsData );
 				const textureData = {}; // evaluate model relationships to textures
 
@@ -1263,18 +1303,19 @@
 
 					const modelsKey = modelsKeys[ i ];
 					const modelData = modelsData[ modelsKey ];
+					const objects = objectsForPart( modelsKey );
 					const objectIds = Object.keys( modelData[ 'resources' ][ 'object' ] );
 
 					for ( let j = 0; j < objectIds.length; j ++ ) {
 
 						const objectId = objectIds[ j ];
-						buildObject( objectId, objects, modelData, textureData );
+						if ( objects[ objectId ] === undefined ) buildObject( objectId, objects, modelData, textureData );
 
 					}
 
 				}
 
-				return objects;
+				return partObjects;
 
 			}
 
@@ -1294,12 +1335,16 @@
 
 				const group = new THREE.Group();
 				const relationship = fetch3DModelPart( data3mf[ 'rels' ] );
-				const buildData = data3mf.model[ relationship[ 'target' ].substring( 1 ) ][ 'build' ];
+				const rootPart = relationship[ 'target' ].substring( 1 );
+				const buildData = data3mf.model[ rootPart ][ 'build' ];
 
 				for ( let i = 0; i < buildData.length; i ++ ) {
 
 					const buildItem = buildData[ i ];
-					const object3D = objects[ buildItem[ 'objectId' ] ]; // apply transform
+					const itemObjects = objects[ buildItem.path || rootPart ] || {};
+					const object3D = itemObjects[ buildItem[ 'objectId' ] ]; // apply transform
+
+					if ( object3D === undefined ) continue;
 
 					const transform = buildItem[ 'transform' ];
 

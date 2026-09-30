@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block title %}{% if og %}{{ og.title }} · {% endif %}{{ boot.site.title }}{% endblock %}
+{% block body_class %}share-page{% endblock %}
+{% block body %}
+<header class="topbar">
+  <a class="brand" href="{% if boot.publicBrowsing %}/{% else %}#{% endif %}">
+    {% include '_brand.html' %}
+    <span class="brand-text"><span class="brand-title">{{ boot.site.title }}</span><span class="brand-tagline">{{ boot.site.tagline }}</span></span>
+  </a>
+  <div class="topbar-actions">
+    <button type="button" class="btn btn-icon btn-ghost" id="themeToggle" aria-label="Temayı değiştir"><svg class="icon" aria-hidden="true"><use href="#i-moon"></use></svg></button>
+    {% if boot.publicBrowsing %}<a class="btn" href="/"><svg class="icon" aria-hidden="true"><use href="#i-layout-grid"></use></svg><span class="btn-label">Arşivi gez</span></a>{% endif %}
+  </div>
+</header>
+<main class="share-page-main">
+  {% if boot.share %}
+  <div class="share-banner">
+    <svg class="icon" aria-hidden="true"><use href="#i-link"></use></svg>
+    <div><strong>Bu model seninle paylaşıldı.</strong> 3D önizlemeyi farenle ya da parmağınla döndürebilirsin{% if boot.share.allowDownload %}; dosyaları indirebilirsin{% endif %}.</div>
+  </div>
+  <div id="shareRoot"></div>
+  {% else %}
+  <div class="empty" style="min-height:60vh">
+    <div class="empty-art"><svg class="icon icon-xl" aria-hidden="true"><use href="#i-link"></use></svg></div>
+    <h3>Bağlantı geçersiz veya süresi dolmuş</h3>
+    <p>Bu paylaşım bağlantısı iptal edilmiş ya da geçerlilik süresi bitmiş olabilir. Bağlantıyı gönderen kişiden yenisini isteyebilirsin.</p>
+    {% if boot.publicBrowsing %}<a class="btn" href="/">Arşive git</a>{% endif %}
+  </div>
+  {% endif %}
+  <footer class="share-footer">{{ boot.site.title }}</footer>
+</main>
+{% endblock %}
+{% block scripts %}
+{% if boot.share %}
+{% include '_three.html' %}
+<script type="module" src="{{ asset_url('js/share-page.js') }}"></script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}{{ code }} · {{ boot.site.title }}{% endblock %}
+{% block body %}
+<main class="error-page">
+  <div style="display:grid;gap:14px;justify-items:center;max-width:420px">
+    <div class="code">{{ code }}</div>
+    <h1 style="margin:0;font-size:20px;letter-spacing:-0.02em">{% if code == 404 %}Aradığın sayfa bulunamadı{% else %}Bir şeyler ters gitti{% endif %}</h1>
+    <p style="margin:0;color:var(--text-3)">{{ message }}</p>
+    <a class="btn btn-primary" href="/"><svg class="icon" aria-hidden="true"><use href="#i-house"></use></svg>Ana sayfaya dön</a>
+  </div>
+</main>
+{% endblock %}

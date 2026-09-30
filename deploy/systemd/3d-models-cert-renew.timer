@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly TLS certificate renewal for 3d-models.perinet.org
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=30m
+Unit=3d-models-cert-renew.service
+
+[Install]
+WantedBy=timers.target
