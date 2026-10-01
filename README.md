@@ -50,6 +50,7 @@ Kullanıcılar ve şifre hash'leri `db.json`'dan ayrı, `0600` izinli `.users.js
 | `MODEL_MANAGER_DEBUG` | Flask hata ayıklama modu | kapalı |
 | `MODEL_MANAGER_MODELS_DIR` | Model klasörü | `./3d models` |
 | `MODEL_MANAGER_DATA_DIR` | `db.json`, `.users.json`, `thumbnails/`, `.uploads/`, `.trash/`, `.secret_key` konumu | uygulama klasörü |
+| `MODEL_MANAGER_TRASH_DIR` / `MODEL_MANAGER_UPLOADS_DIR` | Çöp kutusu ve yarım yüklemeler; model klasörü ayrı bir diskteyse aynı diske koyun | veri klasöründe `.trash/`, `.uploads/` |
 | `MODEL_MANAGER_WORKERS` | gunicorn altında arka plan işçilerini (izleyici + önizleme kuyruğu) başlat | kapalı |
 | `MODEL_MANAGER_TRUST_PROXY` | Ters vekil başlıklarına (X-Forwarded-*) güven | kapalı |
 | `MODEL_MANAGER_SECURE_COOKIES` | Oturum çerezini yalnızca HTTPS'te gönder | kapalı |

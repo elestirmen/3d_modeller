@@ -881,6 +881,37 @@ class PartThumbTests(ApiTestCase):
         self.assertEqual(self.flask_app.test_client().get(url).status_code, 404)
 
 
+class StorageTests(ApiTestCase):
+    def test_unmounted_library_keeps_catalog_and_blocks_uploads(self):
+        self.library.scan()
+        ids = set(self.library.db['catalog'])
+        self.assertEqual(len(ids), 2)
+        hidden = self.models.with_name('models-unmounted')
+        self.models.rename(hidden)
+        self.models.mkdir()  # bağlanmamış disk: boş bağlama noktası
+        summary = self.library.scan()
+        self.assertTrue(summary['unavailable'])
+        self.assertEqual(set(self.library.db['catalog']), ids)
+        self.assertTrue(all(self.library.db['models'][model_id]['missing_since'] is None for model_id in ids))
+        self.login()
+        self.assertEqual(self.post('/api/uploads', {'files': [{'name': 'a.stl', 'size': 3}]}).status_code, 503)
+        self.assertEqual(self.post('/api/scan').status_code, 503)
+        self.models.rmdir()
+        hidden.rename(self.models)
+        self.assertFalse(self.library.scan().get('unavailable'))
+
+    def test_trash_and_uploads_can_live_next_to_the_library(self):
+        storage = Path(self.tmp.name) / 'storage'
+        with patch.dict('os.environ', {'MODEL_MANAGER_TRASH_DIR': str(storage / 'trash'), 'MODEL_MANAGER_UPLOADS_DIR': str(storage / 'uploads')}):
+            flask_app = app.create_app(models_dir=self.models, data_dir=self.data, start_workers=False, testing=True)
+        library = flask_app.extensions['library']
+        self.assertEqual((library.trash_dir, library.uploads_dir), (storage / 'trash', storage / 'uploads'))
+        library.scan()
+        library.trash_model(self.model_id('Kutu'))
+        self.assertTrue(list((storage / 'trash').rglob('box.stl')))
+        self.assertFalse((self.data / '.trash').exists())
+
+
 class DatabaseTests(unittest.TestCase):
     def test_v1_database_is_migrated_with_backup(self):
         with tempfile.TemporaryDirectory() as tmp:

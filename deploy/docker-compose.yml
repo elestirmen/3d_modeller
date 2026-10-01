@@ -15,9 +15,23 @@ services:
       MODEL_MANAGER_WORKERS: "1"
       MODEL_MANAGER_TRUST_PROXY: "1"
       MODEL_MANAGER_SECURE_COOKIES: "1"
+      # Kütüphane SSD'yi doldurmasın: modeller, çöp kutusu ve yarım yüklemeler depolama diskinde.
+      # Veritabanı ve önizlemeler hız için uygulama klasöründe (SSD) kalır.
+      MODEL_MANAGER_MODELS_DIR: /storage/models
+      MODEL_MANAGER_TRASH_DIR: /storage/trash
+      MODEL_MANAGER_UPLOADS_DIR: /storage/uploads
       HOME: /tmp
+    # sambashare: Samba paylaşımından eklenen dosyalar da taşınıp silinebilsin.
+    group_add:
+      - "988"
     volumes:
       - ..:/app
+      # Disk bağlı değilse kaynak klasör yoktur; konteyner boş bir kütüphaneyle açılmak yerine başlamaz.
+      - type: bind
+        source: /mnt/storage/3d-modeller
+        target: /storage
+        bind:
+          create_host_path: false
     networks:
       - npm-net
 

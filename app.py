@@ -362,15 +362,17 @@ def normalize_db(raw):
 class Library:
     """Katalog, kullanıcı verisi, küçük resim kuyruğu ve yüklemeleri yöneten nesne."""
 
-    def __init__(self, models_dir, data_dir):
+    def __init__(self, models_dir, data_dir, trash_dir=None, uploads_dir=None):
         self.models_dir = Path(models_dir)
         self.data_dir = Path(data_dir)
         self.db_path = self.data_dir / 'db.json'
         self.last_good_path = self.data_dir / 'db.last-good.json'
         self._last_good_at = 0.0
         self.thumbs_dir = self.data_dir / 'thumbnails'
-        self.uploads_dir = self.data_dir / '.uploads'
-        self.trash_dir = self.data_dir / '.trash'
+        # Model klasörü ayrı bir diskteyse yüklemeler ve çöp kutusu da orada durmalı: aynı diskte
+        # taşıma bir yeniden adlandırmadır, aksi halde her silme/yükleme veriyi diskler arasında kopyalar.
+        self.uploads_dir = Path(uploads_dir) if uploads_dir else self.data_dir / '.uploads'
+        self.trash_dir = Path(trash_dir) if trash_dir else self.data_dir / '.trash'
         self.admin_path = self.data_dir / '.admin.json'
         self.users_path = self.data_dir / '.users.json'
         self.server_lock_path = self.data_dir / '.server.lock'
@@ -529,8 +531,27 @@ class Library:
         if self.db.get('last_scan') is None:
             self.scan()
 
+    def storage_ready(self):
+        """
+        Model klasörü erişilebilir mi? Klasör yoksa ya da katalogda model varken klasör bomboşsa
+        disk bağlanmamış sayılır (ör. USB disk açılışta gecikti). Böyle bir taramada tüm modeller
+        "kayıp" işaretlenir ve kayıtları 30 gün sonra silinirdi.
+        """
+        if not self.models_dir.is_dir():
+            return False
+        if not self.db['catalog']:
+            return True
+        try:
+            with os.scandir(self.models_dir) as entries:
+                return any(not catalog.is_ignored(entry.name) for entry in entries)
+        except OSError:
+            return False
+
     def scan(self):
         """Klasörü tara, kullanıcı verisini eşleştir, küçük resim işlerini kuyruğa al."""
+        if not self.storage_ready():
+            log.warning('Model klasörü erişilemiyor veya boş (%s); tarama atlandı, katalog korunuyor', self.models_dir)
+            return {'total': len(self.db['catalog']), 'added': [], 'removed': [], 'unavailable': True}
         with self.scan_lock:
             fresh = catalog.scan_library(self.models_dir)
             signature = catalog.library_signature(self.models_dir)
@@ -1592,6 +1613,8 @@ class Library:
     # ── Yüklemeler ──
 
     def create_upload(self, files):
+        if not self.storage_ready():
+            abort(503, description='Model deposu şu an erişilemiyor (disk bağlı değil); biraz sonra tekrar deneyin')
         if not isinstance(files, list) or not files:
             abort(400, description='Yüklenecek dosya yok')
         if len(files) > MAX_UPLOAD_FILES:
@@ -2893,6 +2916,8 @@ def api_preview(filepath):
 @require_admin
 def api_scan():
     summary = lib().scan()
+    if summary.get('unavailable'):
+        abort(503, description='Model klasörü erişilemiyor veya boş; disk bağlı mı? Katalog korunuyor.')
     return jsonify({'success': True, 'total': summary['total'], 'added': len(summary['added']), 'removed': len(summary['removed'])})
 
 
@@ -3100,7 +3125,11 @@ def create_app(models_dir=None, data_dir=None, start_workers=True, testing=False
         TESTING=testing,
     )
     app.json.ensure_ascii = False
-    app.extensions['library'] = Library(models_dir, data_dir)
+    app.extensions['library'] = Library(
+        models_dir, data_dir,
+        trash_dir=os.getenv('MODEL_MANAGER_TRASH_DIR') or None,
+        uploads_dir=os.getenv('MODEL_MANAGER_UPLOADS_DIR') or None,
+    )
     app.register_blueprint(bp)
     app.jinja_env.globals['asset_url'] = asset_url
     if parse_env_bool(os.getenv('MODEL_MANAGER_TRUST_PROXY')):
