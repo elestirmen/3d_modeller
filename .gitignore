@@ -55,6 +55,8 @@ thumbnails/
 .trash/
 # Bakim yedekleri ve yeniden gruplama planlari (kutuphane dosya adlarini icerir)
 .backups/
+# Model kutuphanesi depoda degil, depolama diskinde (/mnt/storage/3d-modeller/models; burada symlink)
+/3d models
 
 # Buyuk dosyalar ve 3D model formatlari (push timeout onlemek icin)
 *.stl
