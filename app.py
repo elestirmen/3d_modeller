@@ -67,6 +67,10 @@ MAX_UPLOAD_TOTAL = 8 * 1024 ** 3
 MAX_UPLOAD_FILES = 500
 MAX_EXTRACT_BYTES = 8 * 1024 ** 3
 UPLOAD_TTL = 24 * 3600
+MAX_ORGANIZE_GROUPS = 200
+PART_THUMB_SIZE = (320, 240)
+# Parça önizlemesi bu boyuttan büyük mesh'lerde üretilmez (3MF gömülü önizlemesi boyuttan bağımsız kullanılır).
+PART_THUMB_MAX_BYTES = 60 * 1024 * 1024
 MISSING_TTL = 30 * 24 * 3600
 LOGIN_WINDOW = 15 * 60
 LOGIN_MAX_FAILURES = 6
@@ -157,6 +161,13 @@ def safe_relative_path(value):
             continue
         parts.append(safe_filename(part, fallback='klasor', max_len=100))
     return parts
+
+
+def folder_name(title, fallback='Yeni model'):
+    """Model başlığından klasör adı: '/' gibi yol ayırıcıları kırpmak yerine tireye çevrilir."""
+    text = re.sub(r'\s*\|+\s*', ' - ', str(title or ''))
+    text = re.sub(r'\s*[/\\]+\s*', '-', text)
+    return re.sub(r'\s{2,}', ' ', safe_filename(text, fallback=fallback, max_len=120)).strip()
 
 
 def unique_path(path):
@@ -386,6 +397,11 @@ class Library:
         self._mesh_slots = threading.BoundedSemaphore(2)
         self._card_lock = threading.Lock()
         self._dirty_since = None
+        self._md5_cache = {}
+        self._part_queue = deque()
+        self._part_pending = set()
+        self._part_cv = threading.Condition()
+        self._part_thread = None
 
     # ── Kalıcılık ──
 
@@ -767,6 +783,8 @@ class Library:
             }
             if entry['format'] in COMPACT_FORMATS:
                 item['meshUrl'] = with_share(file_url(entry['path'], entry.get('member')).replace('/api/file/', '/api/mesh/', 1), share)
+            if entry['kind'] == 'model' and self.part_thumb_possible(entry):
+                item['thumbUrl'] = with_share(file_url(entry['path'], entry.get('member')).replace('/api/file/', '/api/part-thumb/', 1), share)
             if can_download:
                 item['downloadUrl'] = file_url(entry['path'], entry.get('member'), share, download=True)
             return item
@@ -972,6 +990,366 @@ class Library:
         self.scan()
         return str(destination)
 
+    # ── Kopya dosyalar ──
+
+    def file_md5(self, path):
+        """Dosya özeti; boyut ve mtime değişmedikçe önbellekten döner."""
+        path = Path(path)
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+        cached = self._md5_cache.get(key)
+        if cached:
+            return cached
+        digest = hashlib.md5()
+        with open(path, 'rb') as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(block)
+        value = digest.hexdigest()
+        if len(self._md5_cache) > 20000:
+            self._md5_cache.clear()
+        self._md5_cache[key] = value
+        return value
+
+    def _size_index(self):
+        """{boyut: [(model_id, yol), ...]} — zip üyeleri hariç tüm katalog dosyaları."""
+        index = {}
+        for model_id, record in self.db['catalog'].items():
+            for entry in record['files'] + record['assets']:
+                if not entry.get('member'):
+                    index.setdefault(entry['size'], []).append((model_id, entry['path']))
+        return index
+
+    def find_copies(self, full_path, size, size_index, skip_path=None):
+        """Aynı içerikteki kütüphane dosyaları: [(model_id, yol), ...]."""
+        candidates = [item for item in size_index.get(size, []) if item[1] != skip_path]
+        if not candidates:
+            return []
+        try:
+            wanted = self.file_md5(full_path)
+        except OSError:
+            return []
+        copies = []
+        seen = set()
+        for model_id, rel_path in candidates:
+            if (model_id, rel_path) in seen:
+                continue
+            seen.add((model_id, rel_path))
+            try:
+                if self.file_md5(self.models_dir / rel_path) == wanted:
+                    copies.append((model_id, rel_path))
+            except OSError:
+                continue
+        return copies
+
+    def organize_payload(self, model_id, viewer):
+        """Yeniden gruplama penceresi için dosyalar, kopyalar ve akıllı gruplama önerisi."""
+        with self.lock:
+            record = self.record(model_id)
+            if not record or not self.can_view(model_id, viewer):
+                abort(404, description='Model bulunamadı')
+            entries = [entry for entry in record['files'] + record['assets'] if not entry.get('member')]
+            size_index = self._size_index()
+            titles = {}
+            for entry in entries:
+                if entry['format'] == '3mf':
+                    title = catalog.read_3mf_details(self.models_dir / entry['path']).get('title')
+                    if title:
+                        titles[entry['name']] = title
+        files = []
+        for entry in entries:
+            copies = self.find_copies(self.models_dir / entry['path'], entry['size'], size_index, skip_path=entry['path'])
+            files.append({
+                'path': entry['path'],
+                'name': entry['name'],
+                'title': titles.get(entry['name']) or catalog.COPY_SUFFIX.sub('', catalog.clean_title(entry['name'], is_file=True)[0]).strip(' -_') or entry['name'],
+                'kind': entry['kind'],
+                'format': entry['format'],
+                'size': entry['size'],
+                'sizeLabel': catalog.format_size(entry['size']),
+                'shared': bool(self._index.get(entry['path'], set()) - {model_id}),
+                'copies': [{
+                    'modelId': other_id,
+                    'title': self.effective(other_id)['title'],
+                    'path': other_path,
+                    'sameModel': other_id == model_id,
+                } for other_id, other_path in copies if self.can_view(other_id, viewer)],
+            })
+        names = [item['name'] for item in files]
+        suggestion = [
+            {'title': group['title'], 'files': [files[index]['path'] for index in group['files']]}
+            for group in catalog.suggest_groups(names, titles)
+        ]
+        return {
+            'id': model_id,
+            'title': self.effective(model_id)['title'],
+            'main': record['main']['path'],
+            'kind': record['kind'],
+            'files': files,
+            'suggestion': suggestion,
+            'canTrash': viewer.admin,
+        }
+
+    # ── Yeniden gruplama ──
+
+    def _move_into(self, rel_path, directory):
+        source = self.models_dir / rel_path
+        if not source.is_file():
+            abort(409, description=f'Dosya bulunamadı (başka bir işlem taşımış olabilir): {Path(rel_path).name}')
+        directory.mkdir(parents=True, exist_ok=True)
+        target = unique_path(directory / source.name)
+        shutil.move(str(source), str(target))
+        return target
+
+    def _prune_empty_dirs(self, root):
+        """Kökten başlayıp boş kalan klasörleri (ve boşalan üst klasörleri) kaldır."""
+        root = Path(root)
+        if not root.is_dir() or root == self.models_dir:
+            return
+        for folder in sorted((path for path in root.rglob('*') if path.is_dir()), key=lambda path: -len(path.parts)):
+            try:
+                if not any(folder.iterdir()):
+                    folder.rmdir()
+            except OSError:
+                pass
+        parent = root
+        while parent != self.models_dir and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+
+    def reorganize(self, model_id, groups=(), moves=(), trash=(), allow_trash=False, viewer=None):
+        """
+        Bir modelin dosyalarını yeniden dağıt:
+          groups: [{'title', 'files': [yol]}] → her biri kökte yeni bir klasör modeli olur
+          moves:  [{'target': model_id, 'files': [yol]}] → var olan klasör modeline taşınır
+          trash:  [yol] → çöp kutusuna (yalnızca yönetici)
+        Seçilmeyen dosyalar yerinde kalır. Kaynakta hiç model dosyası kalmazsa geri kalan ekler
+        (görsel, README...) ilk hedefe gider ve kaynak model kaldırılır; paylaşım bağlantıları bu hedefe aktarılır.
+        Yeni modeller kaynağın gizlilik ve 18+ ayarını devralır.
+        """
+        if len(groups) > MAX_ORGANIZE_GROUPS:
+            abort(400, description=f'En fazla {MAX_ORGANIZE_GROUPS} yeni model oluşturulabilir')
+        with self.scan_lock:
+            with self.lock:
+                record = self.record(model_id)
+                if not record or (viewer is not None and not self.can_view(model_id, viewer)):
+                    abort(404, description='Model bulunamadı')
+                if record['kind'] == 'archive':
+                    abort(400, description='ZIP arşivi olarak duran modellerin dosyaları taşınamaz; önce arşivi açın')
+                own = {entry['path']: entry for entry in record['files'] + record['assets'] if not entry.get('member')}
+                claimed = set()
+
+                def claim(paths):
+                    cleaned = []
+                    for raw in paths or []:
+                        path = normalize_rel_path(raw)
+                        if path not in own:
+                            abort(400, description=f'Dosya bu modele ait değil: {Path(path).name}')
+                        if path in claimed:
+                            abort(400, description=f'Aynı dosya birden çok yere atanmış: {Path(path).name}')
+                        if self._index.get(path, set()) - {model_id}:
+                            abort(400, description=f'Dosya başka bir modelle ortak, taşınamaz: {Path(path).name}')
+                        claimed.add(path)
+                        cleaned.append(path)
+                    return cleaned
+
+                plan_groups = []
+                for group in groups:
+                    if not isinstance(group, dict):
+                        abort(400, description='Geçersiz grup')
+                    files = claim(group.get('files'))
+                    if not files:
+                        continue
+                    if not any(own[path]['kind'] == 'model' for path in files):
+                        abort(400, description='Her yeni model en az bir 3D model dosyası içermeli')
+                    title = clean_text(group.get('title'), 160) or catalog.clean_title(Path(files[0]).name, is_file=True)[0]
+                    plan_groups.append({'title': title, 'files': files})
+                plan_moves = []
+                for move in moves:
+                    if not isinstance(move, dict):
+                        abort(400, description='Geçersiz taşıma')
+                    target_id = str(move.get('target') or '')
+                    target = self.record(target_id)
+                    if not target or target_id == model_id or (viewer is not None and not self.can_view(target_id, viewer)):
+                        abort(400, description='Hedef model bulunamadı')
+                    if target['kind'] != 'folder':
+                        abort(400, description=f'“{self.effective(target_id)["title"]}” tek dosyalık bir model; dosyalar yalnızca klasör modellerine taşınabilir')
+                    files = claim(move.get('files'))
+                    if files:
+                        plan_moves.append({'target': target_id, 'directory': self.models_dir / target['path'], 'files': files})
+                trash_paths = claim(trash)
+                if trash_paths and not allow_trash:
+                    abort(403, description='Dosyaları çöp kutusuna yalnızca yönetici taşıyabilir')
+                if not claimed:
+                    abort(400, description='Değişiklik yok')
+
+                remaining_models = [path for path, entry in own.items() if entry['kind'] == 'model' and path not in claimed]
+                source_gone = not remaining_models
+                leftovers = [path for path in own if path not in claimed]
+                if source_gone and leftovers:
+                    if plan_groups:
+                        plan_groups[0]['files'].extend(leftovers)
+                    elif plan_moves:
+                        plan_moves[0]['files'].extend(leftovers)
+                    else:
+                        trash_paths.extend(leftovers)
+
+                source_user = self.user(model_id)
+                stamp = now()
+                # Kayıtlar dosyalar taşınmadan önce açılır: yarıda kalan bir işlemde bile
+                # yeni klasörler gizli modelin gizliliğini devralmış olur.
+                for group in plan_groups:
+                    folder = folder_name(group['title'])
+                    destination = unique_path(self.models_dir / folder)
+                    destination.mkdir(parents=True)
+                    group['directory'] = destination
+                    group['rel'] = destination.relative_to(self.models_dir).as_posix()
+                    user = default_user_record()
+                    user['hidden'] = source_user['hidden']
+                    user['nsfw'] = source_user['nsfw']
+                    user['added_at'] = source_user.get('added_at') or stamp
+                    user['uploaded_at'] = source_user.get('uploaded_at')
+                    self.db['models'][catalog.generate_id(group['rel'])] = user
+                self.save()
+
+                trash_dir = None
+                moved = 0
+                completed = False
+                try:
+                    for group in plan_groups:
+                        for path in group['files']:
+                            self._move_into(path, group['directory'])
+                            moved += 1
+                    for move in plan_moves:
+                        for path in move['files']:
+                            self._move_into(path, move['directory'])
+                            moved += 1
+                    if trash_paths:
+                        trash_dir = self.trash_dir / f'{time.strftime("%Y%m%d-%H%M%S")}-{model_id}-dosyalar'
+                        for path in trash_paths:
+                            relative = Path(path).relative_to(record['path']) if path.startswith(record['path'] + '/') else Path(Path(path).name)
+                            self._move_into(path, (trash_dir / relative).parent)
+                            moved += 1
+                    completed = True
+                finally:
+                    if record['kind'] == 'folder':
+                        self._prune_empty_dirs(self.models_dir / record['path'])
+                    # Yarıda kalan işlemde kaynak kaydı korunur; kalan dosyaları gizliliğini kaybetmez.
+                    if completed and source_gone:
+                        heir = plan_groups[0]['rel'] if plan_groups else None
+                        heir_id = catalog.generate_id(heir) if heir else (plan_moves[0]['target'] if plan_moves else None)
+                        for token in [token for token, share in self.db['shares'].items() if share['model_id'] == model_id]:
+                            if heir_id:
+                                self.db['shares'][token]['model_id'] = heir_id
+                            else:
+                                del self.db['shares'][token]
+                        self.db['models'].pop(model_id, None)
+                        self._remove_derived_files(model_id)
+                        self.db['derived'].pop(model_id, None)
+                    self.save()
+        self.scan()
+
+        with self.lock:
+            created = []
+            for group in plan_groups:
+                ids = [other_id for other_id, other in self.db['catalog'].items()
+                       if other['path'] == group['rel'] or other['path'].startswith(group['rel'] + '/')]
+                if len(ids) == 1 and self.db['catalog'][ids[0]]['title'] != group['title']:
+                    self.update_model(ids[0], {'title': group['title']}, save=False)
+                created.extend(ids)
+            self.save()
+            return {
+                'source': model_id if model_id in self.db['catalog'] else None,
+                'created': created,
+                'targets': [move['target'] for move in plan_moves if move['target'] in self.db['catalog']],
+                'moved': moved,
+                'trashed': len(trash_paths),
+                'trash': str(trash_dir) if trash_dir else None,
+            }
+
+    # ── Parça önizlemeleri ──
+
+    def part_thumb_path(self, rel_path, member=None):
+        try:
+            stat = (self.models_dir / rel_path).stat()
+        except OSError:
+            return None
+        raw = f'{RENDER_VERSION}|part|{rel_path}|{member or ""}|{stat.st_size}|{stat.st_mtime_ns}'
+        return self.thumbs_dir / 'parts' / (hashlib.md5(raw.encode('utf-8')).hexdigest()[:20] + '.webp')
+
+    def part_thumb_possible(self, entry):
+        """Önizleme üretilebilir mi: gömülü görselli 3MF ya da sınırı aşmayan mesh."""
+        if entry['format'] not in {'stl', '3mf', 'obj', 'ply'}:
+            return False
+        if entry['format'] == '3mf' and not entry.get('member') and catalog.read_3mf_details(self.models_dir / entry['path']).get('preview_entry'):
+            return True
+        return 0 < entry['size'] <= PART_THUMB_MAX_BYTES
+
+    def part_thumb(self, rel_path, member=None):
+        """('ready', yol) | ('pending', None) | ('none', None). Eksikse arka planda üretilmek üzere kuyruğa alır."""
+        target = self.part_thumb_path(rel_path, member)
+        if target is None:
+            return 'none', None
+        if target.exists():
+            return 'ready', target
+        if target.with_suffix('.fail').exists():
+            return 'none', None
+        full = self.models_dir / rel_path
+        name = member or rel_path
+        fmt = Path(name).suffix.lower().lstrip('.')
+        source = None
+        if fmt == '3mf' and not member:
+            entry = catalog.read_3mf_details(full).get('preview_entry')
+            if entry:
+                source = {'kind': '3mf', 'path': str(full), 'entry': entry}
+        if source is None and fmt in {'stl', '3mf', 'obj', 'ply'}:
+            size = full.stat().st_size if not member else 0
+            if member:
+                info = next((item for item in catalog.list_zip(full) or [] if item['member'] == member), None)
+                size = info['size'] if info else 0
+            if 0 < size <= PART_THUMB_MAX_BYTES:
+                source = {'kind': 'mesh', 'path': str(full), 'member': member}
+        if source is None:
+            return 'none', None
+        job = {'thumb': source, 'output': str(target), 'size': list(PART_THUMB_SIZE)}
+        with self._part_cv:
+            if str(target) not in self._part_pending:
+                self._part_pending.add(str(target))
+                self._part_queue.append(job)
+                self._part_cv.notify_all()
+            if self._part_thread is None:
+                self._part_thread = threading.Thread(target=self._part_loop, name='library-parts', daemon=True)
+                self._part_thread.start()
+        return 'pending', None
+
+    def run_part_job(self, job):
+        target = Path(job['output'])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        result = self.run_job(job)
+        if not result.get('thumb'):
+            try:
+                target.with_suffix('.fail').write_text('; '.join(result.get('errors') or [])[:300], encoding='utf-8')
+            except OSError:
+                pass
+        return result
+
+    def _part_loop(self):
+        while not self._stop.is_set():
+            with self._part_cv:
+                if not self._part_queue:
+                    self._part_cv.wait(timeout=30)
+                if not self._part_queue:
+                    # Boşta kalan iş parçacığı kapanır; sonraki istek yenisini başlatır.
+                    self._part_thread = None
+                    return
+                job = self._part_queue.popleft()
+            try:
+                self.run_part_job(job)
+            except Exception:  # noqa: BLE001
+                log.exception('Parça önizlemesi üretilemedi: %s', job['thumb'].get('path'))
+            finally:
+                with self._part_cv:
+                    self._part_pending.discard(job['output'])
+
     # ── Küçük resimler ──
 
     def queue_derived(self, model_ids=None, force=False):
@@ -1042,7 +1420,7 @@ class Library:
 
     def run_job(self, job):
         """Render işini ayrı bir Python sürecinde çalıştır (GIL ve bellek izolasyonu)."""
-        payload = {key: job[key] for key in ('thumb', 'stats', 'output', 'og_output', 'compact_output') if key in job}
+        payload = {key: job[key] for key in ('thumb', 'stats', 'output', 'og_output', 'compact_output', 'size') if key in job}
         env = dict(os.environ, PYTHONPATH=str(BASE_DIR) + os.pathsep + os.environ.get('PYTHONPATH', ''))
         try:
             proc = subprocess.run(
@@ -1322,15 +1700,78 @@ class Library:
                     except OSError:
                         pass
 
-    def finish_upload(self, upload_id, meta):
+    def _upload_groups(self, meta, files):
+        """Yüklemeyi modellere böl: meta['groups'] = [{'title', 'files': [sıra]}]; verilmezse hepsi tek model."""
+        raw = meta.get('groups')
+        if not isinstance(raw, list) or not raw:
+            return [{'title': clean_text(meta.get('title'), 160), 'indexes': list(range(len(files)))}]
+        if len(raw) > MAX_ORGANIZE_GROUPS:
+            abort(400, description=f'Tek seferde en fazla {MAX_ORGANIZE_GROUPS} model oluşturulabilir')
+        seen = set()
+        groups = []
+        for group in raw:
+            if not isinstance(group, dict) or not isinstance(group.get('files'), list):
+                abort(400, description='Geçersiz grup bilgisi')
+            indexes = []
+            for value in group['files']:
+                index = coerce_int(value, -1)
+                if not 0 <= index < len(files) or index in seen:
+                    abort(400, description='Geçersiz grup bilgisi')
+                seen.add(index)
+                indexes.append(index)
+            if indexes:
+                groups.append({'title': clean_text(group.get('title'), 160), 'indexes': indexes})
+        if not groups:
+            abort(400, description='Geçersiz grup bilgisi')
+        groups[0]['indexes'].extend(index for index in range(len(files)) if index not in seen)
+        return groups
+
+    def _upload_copies(self, upload_id, files):
+        """Kütüphanede birebir aynısı bulunan yüklenen dosyalar: {sıra: [(model_id, yol)]}."""
+        with self.lock:
+            size_index = self._size_index()
+        copies = {}
+        for index, item in enumerate(files):
+            if Path(item['name']).suffix.lower() == '.zip':
+                continue
+            found = self.find_copies(self.uploads_dir / upload_id / item['part'], item['size'], size_index)
+            if found:
+                copies[index] = found
+        return copies
+
+    def finish_upload(self, upload_id, meta, viewer=None):
+        """Yüklemeyi kütüphaneye yerleştir. (oluşturulan_model_kimlikleri, atlanan_kopyalar) döndürür."""
         upload, lock = self._get_upload(upload_id)
         with lock:
             incomplete = [item['name'] for item in upload['files'] if item['received'] != item['size']]
             if incomplete:
                 abort(400, description='Tamamlanmamış dosyalar var: ' + ', '.join(incomplete[:3]))
 
+            files = upload['files']
             target_id = meta.get('target')
-            author_hint = None
+            copies = self._upload_copies(upload_id, files) if meta.get('skip_duplicates') else {}
+            skipped = [{
+                'name': files[index]['name'],
+                'models': [{'id': model_id, 'title': self.effective(model_id)['title'], 'path': path}
+                           for model_id, path in found[:3]
+                           if model_id in self.db['catalog'] and (viewer is None or self.can_view(model_id, viewer))],
+            } for index, found in sorted(copies.items())]
+
+            groups = []
+            for group in ([{'title': '', 'indexes': list(range(len(files)))}] if target_id else self._upload_groups(meta, files)):
+                indexes = [index for index in group['indexes'] if index not in copies]
+                # Yalnızca görsel/belge kalan grup model oluşturamaz; dosyaları atlanır.
+                if not target_id and not any(Path(files[index]['name']).suffix.lower() in catalog.MODEL_FORMATS | {'.zip'} for index in indexes):
+                    continue
+                if indexes:
+                    groups.append({'title': group['title'], 'indexes': indexes})
+            if not groups:
+                self.cancel_upload(upload_id)
+                if skipped:
+                    return [], skipped
+                abort(400, description='Yüklenen dosyalar arasında 3D model bulunamadı (STL, 3MF, OBJ, PLY, GLB...)')
+
+            hidden = bool(meta['hidden']) if 'hidden' in meta else bool(self.settings.get('new_models_hidden'))
             with self.scan_lock:
                 if target_id:
                     record = self.record(target_id)
@@ -1338,68 +1779,85 @@ class Library:
                         abort(404, description='Hedef model bulunamadı')
                     if record['kind'] != 'folder':
                         abort(400, description='Dosya yalnızca klasör tabanlı modellere eklenebilir')
-                    destination = self.models_dir / record['path']
+                    groups[0]['destination'] = self.models_dir / record['path']
                 else:
-                    title = clean_text(meta.get('title'), 160)
-                    if not title:
-                        first = next((item for item in upload['files'] if Path(item['name']).suffix.lower() in catalog.MODEL_FORMATS | {'.zip'}), upload['files'][0])
-                        title = catalog.clean_title(first['name'], is_file=True)[0]
-                    folder = safe_filename(title, fallback='Yeni model', max_len=120)
-                    destination = unique_path(self.models_dir / folder)
-                    destination.mkdir(parents=True)
+                    for group in groups:
+                        title = group['title']
+                        if not title:
+                            first = next((files[index] for index in group['indexes'] if Path(files[index]['name']).suffix.lower() in catalog.MODEL_FORMATS | {'.zip'}), files[group['indexes'][0]])
+                            title = catalog.clean_title(first['name'], is_file=True)[0]
+                        group['title'] = title
+                        folder = folder_name(title)
+                        group['destination'] = unique_path(self.models_dir / folder)
+                        group['destination'].mkdir(parents=True)
+                        # Kayıt tarama öncesi açılır; gizli yüklenen model bir an bile ziyaretçiye görünmez.
+                        rel = group['destination'].relative_to(self.models_dir).as_posix()
+                        with self.lock:
+                            user = self.db['models'].setdefault(catalog.generate_id(rel), default_user_record())
+                            user['hidden'] = hidden
+                    with self.lock:
+                        self.save()
 
                 source_dir = self.uploads_dir / upload_id
                 placed = []
                 try:
-                    for item in upload['files']:
-                        part = source_dir / item['part']
-                        subdir = destination.joinpath(*item['dirs']) if item['dirs'] else destination
-                        subdir.mkdir(parents=True, exist_ok=True)
-                        if Path(item['name']).suffix.lower() == '.zip':
-                            hint = extract_zip_safely(part, subdir, zip_name=item['name'])
-                            author_hint = author_hint or hint
-                        else:
-                            target = unique_path(subdir / item['name'])
-                            shutil.move(str(part), str(target))
-                            placed.append((target, part))
+                    for group in groups:
+                        destination = group['destination']
+                        for index in group['indexes']:
+                            item = files[index]
+                            part = source_dir / item['part']
+                            subdir = destination.joinpath(*item['dirs']) if item['dirs'] else destination
+                            subdir.mkdir(parents=True, exist_ok=True)
+                            if Path(item['name']).suffix.lower() == '.zip':
+                                hint = extract_zip_safely(part, subdir, zip_name=item['name'])
+                                group['author_hint'] = group.get('author_hint') or hint
+                            else:
+                                target = unique_path(subdir / item['name'])
+                                shutil.move(str(part), str(target))
+                                placed.append((target, part))
                 except BaseException:
                     if target_id:
                         for target, part in placed:
                             if target.exists() and not part.exists():
                                 shutil.move(str(target), str(part))
                     else:
-                        shutil.rmtree(destination, ignore_errors=True)
+                        for group in groups:
+                            shutil.rmtree(group['destination'], ignore_errors=True)
                     raise
 
             self.cancel_upload(upload_id)
             self.scan()
 
-        rel_dest = destination.relative_to(self.models_dir).as_posix()
         with self.lock:
-            created = [
-                model_id for model_id, record in self.db['catalog'].items()
-                if record['path'] == rel_dest or record['path'].startswith(rel_dest + '/')
-            ]
-            if target_id:
-                created = [target_id] if target_id in self.db['catalog'] else created
+            stamp = now()
+            created = []
+            for group in groups:
+                rel_dest = group['destination'].relative_to(self.models_dir).as_posix()
+                ids = [
+                    model_id for model_id, record in self.db['catalog'].items()
+                    if record['path'] == rel_dest or record['path'].startswith(rel_dest + '/')
+                ]
+                if target_id:
+                    ids = [target_id] if target_id in self.db['catalog'] else ids
+                group['created'] = ids
+                for model_id in ids:
+                    user = self.db['models'].setdefault(model_id, default_user_record())
+                    if not target_id:
+                        user['added_at'] = stamp
+                        user['uploaded_at'] = stamp
+                        if group.get('author_hint') and not meta.get('author'):
+                            user['author'] = group['author_hint']
+                created.extend(ids)
             if not created:
                 if not target_id:
-                    shutil.move(str(destination), str(unique_path(self.trash_dir / destination.name)))
+                    for group in groups:
+                        if group['destination'].exists():
+                            shutil.move(str(group['destination']), str(unique_path(self.trash_dir / group['destination'].name)))
                     self.scan()
                 abort(400, description='Yüklenen dosyalar arasında 3D model bulunamadı (STL, 3MF, OBJ, PLY, GLB...)')
-            stamp = now()
-            for model_id in created:
-                user = self.db['models'].setdefault(model_id, default_user_record())
-                if not target_id:
-                    user['added_at'] = stamp
-                    user['uploaded_at'] = stamp
-                    if author_hint and not meta.get('author'):
-                        user['author'] = author_hint
             self.save()
 
         updates = {key: meta[key] for key in ('category', 'tags', 'description', 'author', 'source_url', 'license', 'hidden', 'nsfw') if key in meta}
-        if not target_id and len(created) == 1 and meta.get('title'):
-            updates['title'] = meta['title']
         for key in ('description', 'author', 'source_url', 'license'):
             if key in updates and not str(updates[key] or '').strip():
                 updates.pop(key)
@@ -1407,9 +1865,13 @@ class Library:
             updates.pop('tags')
         if updates.get('category') in (None, ''):
             updates.pop('category', None)
-        for model_id in created:
-            self.update_model(model_id, updates)
-        return created
+        for group in groups:
+            for model_id in group['created']:
+                changes = dict(updates)
+                if not target_id and len(group['created']) == 1 and group['title'] and (meta.get('title') or meta.get('groups')):
+                    changes['title'] = group['title']
+                self.update_model(model_id, changes)
+        return created, skipped
 
     # ── Paylaşımlar ──
 
@@ -2179,6 +2641,29 @@ def api_refresh_thumbnail(model_id):
     return jsonify({'queued': queued})
 
 
+@bp.route('/api/models/<model_id>/organize')
+@require_editor
+def api_organize_info(model_id):
+    """Yeniden gruplama penceresi: dosyalar, kopyaları ve akıllı gruplama önerisi."""
+    return jsonify(lib().organize_payload(model_id, current_viewer()))
+
+
+@bp.route('/api/models/<model_id>/organize', methods=['POST'])
+@require_editor
+def api_organize(model_id):
+    """Dosyaları yeni modellere böl, başka modele taşı veya (yönetici) çöp kutusuna at."""
+    library = lib()
+    data = json_body()
+    groups, moves, trash = data.get('groups') or [], data.get('moves') or [], data.get('trash') or []
+    if not all(isinstance(value, list) for value in (groups, moves, trash)):
+        abort(400, description='groups, moves ve trash liste olmalı')
+    viewer = current_viewer()
+    result = library.reorganize(model_id, groups=groups, moves=moves, trash=trash, allow_trash=is_admin(), viewer=viewer)
+    with library.lock:
+        result['models'] = [library.card(other_id, viewer) for other_id in result['created'] if other_id in library.db['catalog']]
+    return jsonify(result)
+
+
 @bp.route('/api/models/<model_id>/download')
 def api_download_model(model_id):
     library = lib()
@@ -2362,6 +2847,25 @@ def api_mesh(filepath):
     return private_cache(send_file(compact, mimetype='application/octet-stream', conditional=True), 86400)
 
 
+@bp.route('/api/part-thumb/<path:filepath>')
+def api_part_thumb(filepath):
+    """Model parçasının küçük önizlemesi; hazır değilse 202 döner ve arka planda üretilir."""
+    viewer = current_viewer()
+    rel_path, _full_path = resolve_library_file(filepath)
+    ensure_file_access(rel_path, viewer)
+    member = request.args.get('member') or None
+    state, path = lib().part_thumb(rel_path, member)
+    if state == 'ready':
+        return private_cache(send_file(path, mimetype='image/webp', conditional=True), 86400)
+    if state == 'pending':
+        response = jsonify({'pending': True})
+        response.status_code = 202
+        response.headers['Retry-After'] = '2'
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    abort(404)
+
+
 @bp.route('/api/preview/<path:filepath>')
 def api_preview(filepath):
     viewer = current_viewer()
@@ -2476,6 +2980,7 @@ def api_classify():
         'tags': categories.auto_tags(texts),
         'nsfw': categories.is_nsfw(texts),
         'title': suggested_title,
+        'groups': catalog.suggest_groups(names),
     })
 
 
@@ -2501,10 +3006,10 @@ def api_upload_chunk(upload_id, index):
 @require_editor
 def api_complete_upload(upload_id):
     library = lib()
-    created = library.finish_upload(upload_id, json_body())
     viewer = current_viewer()
+    created, skipped = library.finish_upload(upload_id, json_body(), viewer=viewer)
     with library.lock:
-        return jsonify({'models': [library.detail(model_id, viewer) for model_id in created]})
+        return jsonify({'models': [library.detail(model_id, viewer) for model_id in created], 'skipped': skipped})
 
 
 @bp.route('/api/uploads/<upload_id>', methods=['DELETE'])
@@ -2622,6 +3127,8 @@ def main(argv=None):
     sub.add_parser('scan', help='Kütüphaneyi tara')
     thumbs_cmd = sub.add_parser('thumbnails', help='Eksik küçük resimleri üret')
     thumbs_cmd.add_argument('--all', action='store_true', help='Tümünü yeniden üret')
+    organize_cmd = sub.add_parser('reorganize', help='Dosyaları plana göre yeniden grupla (sunucu kapalıyken)')
+    organize_cmd.add_argument('plan', help='JSON plan dosyası (- = standart girdi): [{"model", "groups", "moves", "trash"}]')
     args = parser.parse_args(argv)
     library = app.extensions['library']
 
@@ -2640,12 +3147,26 @@ def main(argv=None):
             return 1
         print('Yönetici şifresi güncellendi. Açık oturumlar kapatıldı.')
         return 0
-    if args.command in {'scan', 'thumbnails'} and not library.acquire_server_lock():
+    if args.command in {'scan', 'thumbnails', 'reorganize'} and not library.acquire_server_lock():
         print('Sunucu çalışıyor. Tarama ve önizleme işlemlerini web arayüzündeki Ayarlar → Bakım sekmesinden yapın.', file=sys.stderr)
         return 1
     if args.command == 'scan':
         summary = library.scan()
         print(f"{summary['total']} model · {len(summary['added'])} yeni · {len(summary['removed'])} kaldırıldı")
+        return 0
+    if args.command == 'reorganize':
+        text = sys.stdin.read() if args.plan == '-' else Path(args.plan).read_text(encoding='utf-8')
+        library.ensure_scanned()
+        for step in json.loads(text):
+            model_id = step['model']
+            title = library.effective(model_id)['title'] if library.record(model_id) else model_id
+            with app.test_request_context():
+                result = library.reorganize(
+                    model_id, groups=step.get('groups') or [], moves=step.get('moves') or [],
+                    trash=step.get('trash') or [], allow_trash=True,
+                )
+            print(f"{title}: {len(result['created'])} yeni model, {len(result['targets'])} hedefe taşıma, "
+                  f"{result['trashed']} dosya çöpe{' · kaynak kaldırıldı' if result['source'] is None else ''}")
         return 0
     if args.command == 'thumbnails':
         library.ensure_scanned()

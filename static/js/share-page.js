@@ -51,6 +51,13 @@ function start() {
     onShare: openShareBox,
   });
   view.render(share.model);
+  document.addEventListener('keydown', (event) => {
+    if (event.target.closest('input, textarea, select') || document.querySelector('dialog[open]')) return;
+    if (event.shiftKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      event.preventDefault();
+      view.stepPart(event.key === 'ArrowLeft' ? -1 : 1);
+    }
+  });
 }
 
 $('#themeToggle')?.addEventListener('click', () => {

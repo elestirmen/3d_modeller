@@ -4,7 +4,7 @@
 
 import {
   $, $$, absoluteUrl, api, boot, categories, categoryLabel, confirmDialog, copyText, createModal, debounce, esc,
-  formatBytes, formatDate, formatRelative, getCsrf, icon, qrSvg, setCsrf, shareTargets, toast,
+  fold, formatBytes, formatDate, formatRelative, getCsrf, icon, qrSvg, setCsrf, shareTargets, toast,
 } from './core.js';
 
 const LICENSES = ['CC BY', 'CC BY-SA', 'CC BY-NC', 'CC BY-NC-SA', 'CC BY-ND', 'CC BY-NC-ND', 'CC0 / Kamu malı', 'GPL', 'Standart Dijital Dosya Lisansı', 'Kişisel kullanım'];
@@ -251,6 +251,9 @@ function fileIconName(name) {
   return 'file-text';
 }
 
+const MODEL_EXTS = new Set(['stl', '3mf', 'obj', 'ply', 'glb', 'gltf', 'fbx', 'zip']);
+const isModelFile = (file) => MODEL_EXTS.has(file.name.split('.').pop().toLowerCase());
+
 export function openUpload({ target = null, allTags = [], onDone } = {}) {
   const formats = boot.uploadFormats || [];
   const accept = formats.map((ext) => `.${ext}`).join(',');
@@ -268,41 +271,58 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
           <input type="file" multiple accept="${esc(accept)}" data-input="files" hidden>
           <input type="file" multiple webkitdirectory data-input="folder" hidden>
         </div>
+        ${target ? '' : `
+          <div class="upload-mode" data-mode-box hidden>
+            <div class="segmented" role="radiogroup" aria-label="Dosyalar nasıl eklensin">
+              <button type="button" role="radio" data-mode="single" aria-checked="true">${icon('box', 'icon-sm')}Tek model</button>
+              <button type="button" role="radio" data-mode="separate" aria-checked="false">${icon('layers', 'icon-sm')}Ayrı modeller <span class="count" data-group-count></span></button>
+            </div>
+            <span class="field-hint" data-mode-hint></span>
+          </div>`}
         <div class="upload-files scroll-thin" data-files></div>
         <div class="upload-summary" data-summary hidden></div>
+        <label class="switch switch-compact" style="margin-top:8px">
+          <span class="switch-text"><span class="switch-title">Arşivde zaten olan dosyaları atla</span><span class="switch-desc">Birebir aynı dosya başka bir modelde varsa tekrar eklenmez</span></span>
+          <input type="checkbox" name="skip_duplicates" checked><span class="switch-track"></span>
+        </label>
       </div>
       ${target ? '' : `
         <form data-meta novalidate>
-          <div class="field">
-            <label class="field-label" for="up-title">Başlık</label>
-            <input class="input" id="up-title" name="title" maxlength="160" placeholder="Dosya adından otomatik doldurulur">
+          <div data-single-only>
+            <div class="field">
+              <label class="field-label" for="up-title">Başlık</label>
+              <input class="input" id="up-title" name="title" maxlength="160" placeholder="Dosya adından otomatik doldurulur">
+            </div>
           </div>
+          <div class="notice" data-separate-only hidden>${icon('info')}<div>Her grup ayrı bir model olur; adlarını soldaki listeden değiştirebilir, dosyaları gruplar arasında taşıyabilirsin. Kategori her model için ayrı belirlenir.</div></div>
           <div class="field">
             <label class="field-label" for="up-category">Kategori <span class="suggest-hint" data-suggest hidden>${icon('sparkles', 'icon-xs')}<span></span></span></label>
             <select class="select" id="up-category" name="category"><option value="">Otomatik belirle</option>${categoryOptions(null)}</select>
           </div>
           <div class="field">
-            <span class="field-label">Etiketler</span>
+            <span class="field-label">Etiketler <span class="field-hint" data-separate-only hidden>· tüm modellere eklenir</span></span>
             <div data-tags></div>
           </div>
-          <div class="field">
-            <label class="field-label" for="up-desc">Açıklama</label>
-            <textarea class="textarea" id="up-desc" name="description" rows="3" maxlength="6000" placeholder="Baskı notları, parça listesi, montaj..."></textarea>
-          </div>
-          <div class="field-row" style="margin-top:14px">
+          <div data-single-only>
             <div class="field">
-              <label class="field-label" for="up-author">Tasarımcı</label>
-              <input class="input" id="up-author" name="author" maxlength="120" placeholder="Opsiyonel">
+              <label class="field-label" for="up-desc">Açıklama</label>
+              <textarea class="textarea" id="up-desc" name="description" rows="3" maxlength="6000" placeholder="Baskı notları, parça listesi, montaj..."></textarea>
+            </div>
+            <div class="field-row" style="margin-top:14px">
+              <div class="field">
+                <label class="field-label" for="up-author">Tasarımcı</label>
+                <input class="input" id="up-author" name="author" maxlength="120" placeholder="Opsiyonel">
+              </div>
+              <div class="field">
+                <label class="field-label" for="up-license">Lisans</label>
+                <input class="input" id="up-license" name="license" maxlength="120" list="license-options" placeholder="Opsiyonel">
+                <datalist id="license-options">${LICENSES.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist>
+              </div>
             </div>
             <div class="field">
-              <label class="field-label" for="up-license">Lisans</label>
-              <input class="input" id="up-license" name="license" maxlength="120" list="license-options" placeholder="Opsiyonel">
-              <datalist id="license-options">${LICENSES.map((item) => `<option value="${esc(item)}"></option>`).join('')}</datalist>
+              <label class="field-label" for="up-source">Kaynak bağlantısı</label>
+              <input class="input" id="up-source" name="source_url" type="url" maxlength="500" placeholder="https://www.printables.com/model/...">
             </div>
-          </div>
-          <div class="field">
-            <label class="field-label" for="up-source">Kaynak bağlantısı</label>
-            <input class="input" id="up-source" name="source_url" type="url" maxlength="500" placeholder="https://www.printables.com/model/...">
           </div>
           <div style="margin-top:8px">
             ${switchHtml('hidden', 'Ziyaretçilerden gizle', boot.newModelsHidden ? 'Yeni modeller varsayılan olarak gizli (Ayarlar → Gizlilik)' : 'Yalnızca sen ve paylaşım bağlantısı olanlar görür', Boolean(boot.newModelsHidden))}
@@ -313,7 +333,7 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
 
   const dialog = createModal({
     title: target ? 'Dosya ekle' : 'Model yükle',
-    description: target ? `“${target.title}” modeline yeni dosyalar ekle` : 'Arşivine yeni bir model ekle',
+    description: target ? `“${target.title}” modeline yeni dosyalar ekle` : 'Arşivine yeni modeller ekle',
     iconName: 'cloud-upload',
     className: target ? '' : 'modal-wide',
     body,
@@ -321,36 +341,80 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
       <span class="field-hint" data-status></span>
       <span class="spacer"></span>
       <button type="button" class="btn btn-ghost" data-cancel>Vazgeç</button>
-      <button type="button" class="btn btn-primary" data-submit disabled>${icon('upload')}Yükle</button>`,
+      <button type="button" class="btn btn-primary" data-submit disabled>${icon('upload')}<span data-submit-label>Yükle</span></button>`,
   });
 
   let files = [];
   let controller = null;
   let busy = false;
+  // Ayrı modeller modu: her grup bir model. groupsTouched: kullanıcı grupları elle değiştirdi mi.
+  let mode = 'single';
+  let modeTouched = false;
+  let groups = [];
+  let groupsTouched = false;
+  let tagsTouched = false;
   const list = $('[data-files]', dialog);
   const summary = $('[data-summary]', dialog);
   const submit = $('[data-submit]', dialog);
   const status = $('[data-status]', dialog);
   const form = $('[data-meta]', dialog);
+  const modeBox = $('[data-mode-box]', dialog);
   const tags = form ? tagEditor($('[data-tags]', dialog), [], allTags) : null;
   const titleInput = form?.querySelector('[name="title"]');
   let titleTouched = false;
   titleInput?.addEventListener('input', () => { titleTouched = true; suggest(); });
+  $('[data-tags]', dialog)?.addEventListener('keydown', () => { tagsTouched = true; });
+
+  const modelCount = () => files.filter(isModelFile).length;
+  const fromFolder = () => files.some((file) => file.webkitRelativePath && file.webkitRelativePath.includes('/'));
+  const separate = () => mode === 'separate' && groups.length > 0;
+
+  const setGroupsFromSuggestion = (suggestion) => {
+    groups = (suggestion || [])
+      .map((group) => ({ title: group.title, files: group.files.map((index) => files[index]).filter(Boolean) }))
+      .filter((group) => group.files.length);
+    const assigned = new Set(groups.flatMap((group) => group.files));
+    const stray = files.filter((file) => !assigned.has(file));
+    if (stray.length && groups.length) groups[0].files.push(...stray);
+    groupsTouched = false;
+  };
+
+  const updateMode = () => {
+    if (!modeBox) return;
+    const many = modelCount() >= 2 && groups.length >= 2;
+    modeBox.hidden = !many;
+    if (!many) mode = 'single';
+    else if (!modeTouched) mode = !fromFolder() && modelCount() >= 6 && groups.length >= 3 ? 'separate' : 'single';
+    modeBox.querySelectorAll('[data-mode]').forEach((button) => button.setAttribute('aria-checked', String(button.dataset.mode === mode)));
+    $('[data-group-count]', dialog).textContent = groups.length ? String(groups.length) : '';
+    $('[data-mode-hint]', dialog).textContent = mode === 'separate'
+      ? `${files.length} dosya ${groups.length} ayrı model olarak eklenecek. Gruplar dosya adlarından önerildi.`
+      : `${files.length} dosyanın hepsi tek bir modelin parçası olacak.`;
+    dialog.querySelectorAll('[data-single-only]').forEach((node) => { node.hidden = mode === 'separate'; });
+    dialog.querySelectorAll('[data-separate-only]').forEach((node) => { node.hidden = mode !== 'separate'; });
+    const hint = $('[data-suggest]', dialog);
+    if (hint && mode === 'separate') hint.hidden = true;
+  };
 
   const suggest = debounce(async () => {
     if (!form || !files.length) return;
+    const snapshot = [...files];
     try {
       const result = await api('/api/classify', {
         method: 'POST',
-        body: { title: titleInput.value, files: files.map((file) => file.webkitRelativePath || file.name) },
+        body: { title: titleInput.value, files: snapshot.map((file) => file.webkitRelativePath || file.name) },
       });
+      if (snapshot.length !== files.length || snapshot.some((file, index) => file !== files[index])) return;
+      if (!groupsTouched) setGroupsFromSuggestion(result.groups);
+      updateMode();
       if (!titleTouched && !titleInput.value && result.title) titleInput.placeholder = result.title;
       const hint = $('[data-suggest]', dialog);
-      hint.hidden = !result.category;
+      hint.hidden = !result.category || mode === 'separate';
       hint.querySelector('span').textContent = `Önerilen: ${categoryLabel(result.category)}`;
       hint.dataset.value = result.category;
       if (result.nsfw) form.querySelector('[name="nsfw"]').checked = true;
-      if (result.tags?.length && !tags.get().length) tags.set(result.tags);
+      if (mode !== 'separate' && result.tags?.length && !tags.get().length && !tagsTouched) tags.set(result.tags);
+      renderFiles();
     } catch { /* öneri opsiyonel */ }
   }, 350);
 
@@ -359,9 +423,25 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
     if (value) form.querySelector('[name="category"]').value = value;
   });
 
-  const renderFiles = () => {
-    const total = files.reduce((sum, file) => sum + file.size, 0);
-    list.innerHTML = files.map((file, index) => `
+  modeBox?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-mode]');
+    if (!button || busy) return;
+    mode = button.dataset.mode;
+    modeTouched = true;
+    // Tüm dosyalardan çıkarılan etiket önerisi ayrı modellere uymaz.
+    if (mode === 'separate' && !tagsTouched) tags?.set([]);
+    updateMode();
+    renderFiles();
+  });
+
+  const fileRow = (file) => {
+    const index = files.indexOf(file);
+    const groupSelect = separate() ? `
+      <select class="select select-sm upload-group-select" data-group-of="${index}" ${busy ? 'disabled' : ''} aria-label="${esc(file.name)} hangi modele">
+        ${groups.map((group, groupIndex) => `<option value="${groupIndex}" ${group.files.includes(file) ? 'selected' : ''}>${esc(group.title)}</option>`).join('')}
+        <option value="new">＋ Yeni model</option>
+      </select>` : '';
+    return `
       <div class="upload-file" data-file="${index}">
         <span class="file-ext is-model">${icon(fileIconName(file.name), 'icon-sm')}</span>
         <div class="file-meta">
@@ -369,12 +449,54 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
           <div class="upload-bar"><div></div></div>
         </div>
         <span class="file-size">${esc(formatBytes(file.size))}</span>
+        ${groupSelect}
         <button type="button" class="btn btn-ghost btn-icon btn-sm" data-remove="${index}" aria-label="Kaldır" ${busy ? 'disabled' : ''}>${icon('x', 'icon-sm')}</button>
-      </div>`).join('');
-    summary.hidden = !files.length;
-    summary.innerHTML = `<span>${files.length} dosya</span><span>${esc(formatBytes(total))}</span>`;
-    submit.disabled = !files.length || busy;
+      </div>`;
   };
+
+  const renderFiles = () => {
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    if (separate()) {
+      list.classList.add('is-grouped');
+      list.innerHTML = groups.map((group, groupIndex) => `
+        <div class="upload-group">
+          <div class="upload-group-head">
+            ${icon('box', 'icon-sm')}
+            <input class="input input-sm" value="${esc(group.title)}" maxlength="160" data-group-title="${groupIndex}" aria-label="Model adı" ${busy ? 'disabled' : ''}>
+            <span class="count">${group.files.length}</span>
+          </div>
+          ${group.files.map(fileRow).join('')}
+        </div>`).join('');
+    } else {
+      list.classList.remove('is-grouped');
+      list.innerHTML = files.map(fileRow).join('');
+    }
+    summary.hidden = !files.length;
+    summary.innerHTML = `<span>${files.length} dosya${separate() ? ` · ${groups.length} model` : ''}</span><span>${esc(formatBytes(total))}</span>`;
+    submit.disabled = !files.length || busy;
+    $('[data-submit-label]', dialog).textContent = separate() ? `Yükle · ${groups.length} model` : 'Yükle';
+  };
+
+  list.addEventListener('change', (event) => {
+    const select = event.target.closest('[data-group-of]');
+    if (select) {
+      const file = files[Number(select.dataset.groupOf)];
+      groups.forEach((group) => { group.files = group.files.filter((item) => item !== file); });
+      if (select.value === 'new') groups.push({ title: fileTitle(file.name), files: [file] });
+      else groups[Number(select.value)].files.push(file);
+      groups = groups.filter((group) => group.files.length);
+      groupsTouched = true;
+      updateMode();
+      renderFiles();
+      return;
+    }
+    const title = event.target.closest('[data-group-title]');
+    if (title) {
+      const group = groups[Number(title.dataset.groupTitle)];
+      if (group) group.title = title.value.trim() || group.title;
+      groupsTouched = true;
+    }
+  });
 
   const addFiles = (incoming) => {
     const allowed = new Set(formats);
@@ -390,6 +512,7 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
       }
     }
     if (skipped.length) toast(`${skipped.length} dosya desteklenmediği için atlandı`, 'info');
+    groupsTouched = false;
     renderFiles();
     suggest();
   };
@@ -405,8 +528,13 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
     }
     const remove = event.target.closest('[data-remove]');
     if (remove && !busy) {
-      files.splice(Number(remove.dataset.remove), 1);
+      const file = files[Number(remove.dataset.remove)];
+      files = files.filter((item) => item !== file);
+      groups.forEach((group) => { group.files = group.files.filter((item) => item !== file); });
+      groups = groups.filter((group) => group.files.length);
+      updateMode();
       renderFiles();
+      suggest();
     }
   });
   dropzone.addEventListener('click', (event) => {
@@ -442,27 +570,33 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
 
   const setBusy = (value) => {
     busy = value;
-    dialog.querySelectorAll('input, select, textarea, [data-pick]').forEach((element) => { element.disabled = value; });
+    dialog.querySelectorAll('input, select, textarea, [data-pick], [data-mode]').forEach((element) => { element.disabled = value; });
     submit.disabled = value || !files.length;
-    renderFilesProgressOnly();
-  };
-  const renderFilesProgressOnly = () => {
     $$('[data-remove]', list).forEach((button) => { button.disabled = busy; });
   };
 
   const collectMeta = () => {
-    if (!form) return { target: target.id };
+    const skip = $('[name="skip_duplicates"]', dialog).checked;
+    if (!form) return { target: target.id, skip_duplicates: skip };
     const data = new FormData(form);
-    return {
-      title: (data.get('title') || '').trim(),
+    const meta = {
       category: data.get('category') || null,
       tags: tags.get(),
+      hidden: form.querySelector('[name="hidden"]').checked,
+      nsfw: form.querySelector('[name="nsfw"]').checked || undefined,
+      skip_duplicates: skip,
+    };
+    if (separate()) {
+      meta.groups = groups.map((group) => ({ title: group.title, files: group.files.map((file) => files.indexOf(file)) }));
+      return meta;
+    }
+    return {
+      ...meta,
+      title: (data.get('title') || '').trim(),
       description: (data.get('description') || '').trim(),
       author: (data.get('author') || '').trim(),
       license: (data.get('license') || '').trim(),
       source_url: (data.get('source_url') || '').trim(),
-      hidden: form.querySelector('[name="hidden"]').checked,
-      nsfw: form.querySelector('[name="nsfw"]').checked || undefined,
     };
   };
 
@@ -471,6 +605,11 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
     const meta = collectMeta();
     if (meta.source_url && !/^https?:\/\//i.test(meta.source_url)) {
       toast('Kaynak bağlantısı http:// veya https:// ile başlamalı', 'error');
+      return;
+    }
+    const empty = separate() && groups.find((group) => !group.files.some(isModelFile));
+    if (empty) {
+      toast(`“${empty.title}” grubunda 3D model dosyası yok; dosyalarını başka bir gruba taşı`, 'error', { duration: 6000 });
       return;
     }
     controller = new AbortController();
@@ -495,9 +634,9 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
           status.textContent = `%${Math.round((total / totalBytes) * 100)} · ${formatBytes(total)} / ${formatBytes(totalBytes)}${speed ? ` · ${formatBytes(speed)}/sn` : ''}`;
         },
       });
-      status.textContent = 'Dosyalar işleniyor, önizleme hazırlanıyor…';
+      status.textContent = meta.skip_duplicates ? 'Kopyalar kontrol ediliyor, önizleme hazırlanıyor…' : 'Dosyalar işleniyor, önizleme hazırlanıyor…';
       const result = await api(`/api/uploads/${uploadId}/complete`, { method: 'POST', body: meta });
-      showSuccess(result.models);
+      showSuccess(result.models, result.skipped || []);
     } catch (error) {
       if (error.aborted) {
         status.textContent = 'İptal edildi';
@@ -520,23 +659,35 @@ export function openUpload({ target = null, allTags = [], onDone } = {}) {
     if (busy) event.preventDefault();
   });
 
-  const showSuccess = (models) => {
+  const showSuccess = (models, skipped) => {
     busy = false;
     const first = models[0];
+    const heading = !models.length ? 'Yeni dosya eklenmedi'
+      : target ? 'Dosyalar eklendi' : models.length > 1 ? `${models.length} model eklendi` : 'Model yüklendi';
+    const skippedHtml = skipped.length ? `
+      <div class="notice is-warning skipped-list">${icon('copy')}<div>
+        <strong>${skipped.length} dosya arşivde zaten vardı, tekrar eklenmedi:</strong>
+        <ul>${skipped.slice(0, 12).map((item) => `<li>${esc(item.name)}${item.models[0] ? ` → <button type="button" class="link-btn" data-open-existing="${esc(item.models[0].id)}">${esc(item.models[0].title)}</button>` : ''}</li>`).join('')}${skipped.length > 12 ? `<li>… ve ${skipped.length - 12} dosya daha</li>` : ''}</ul>
+      </div></div>` : '';
     $('.modal-body', dialog).innerHTML = `
       <div class="success-state">
-        <div class="empty-art">${icon('circle-check', 'icon-xl')}</div>
-        <h3 style="margin:0;font-size:18px">${target ? 'Dosyalar eklendi' : models.length > 1 ? `${models.length} model eklendi` : 'Model yüklendi'}</h3>
-        <p style="margin:0;color:var(--text-3)">${esc(first?.title || '')}${first ? ` · ${esc(categoryLabel(first.category))}` : ''}</p>
-      </div>`;
+        <div class="empty-art">${icon(models.length ? 'circle-check' : 'info', 'icon-xl')}</div>
+        <h3 style="margin:0;font-size:18px">${heading}</h3>
+        ${first ? `<p style="margin:0;color:var(--text-3)">${models.length > 1 ? models.slice(0, 4).map((item) => esc(item.title)).join(' · ') + (models.length > 4 ? ' …' : '') : `${esc(first.title)} · ${esc(categoryLabel(first.category))}`}</p>` : ''}
+      </div>
+      ${skippedHtml}`;
     $('.modal-foot', dialog).innerHTML = `
       <span class="spacer"></span>
       ${target ? '' : '<button type="button" class="btn" data-again>Yeni yükleme</button>'}
-      <button type="button" class="btn btn-primary" data-open>${icon('eye')}Modeli aç</button>`;
-    $('[data-open]', dialog).addEventListener('click', () => {
+      ${first ? `<button type="button" class="btn btn-primary" data-open>${icon('eye')}${models.length > 1 ? 'İlk modeli aç' : 'Modeli aç'}</button>` : '<button type="button" class="btn btn-primary" data-close>Tamam</button>'}`;
+    $('[data-open]', dialog)?.addEventListener('click', () => {
       dialog.close();
       onDone?.(models, { open: true });
     });
+    dialog.querySelectorAll('[data-open-existing]').forEach((button) => button.addEventListener('click', () => {
+      dialog.close();
+      onDone?.([{ id: button.dataset.openExisting }], { open: true });
+    }));
     $('[data-again]', dialog)?.addEventListener('click', () => {
       dialog.close();
       onDone?.(models, { open: false });
@@ -570,6 +721,342 @@ async function readEntries(entries, prefix = '') {
     }
   }
   return files;
+}
+
+// ─── Dosyaları yeniden gruplama ─────────────────────────────────────
+
+/** Klasör modelleri arasından arama yaparak bir hedef seç. Seçilen kartla (veya null) çözülür. */
+export function pickModel({ models, exclude = null, title = 'Hedef model seç' } = {}) {
+  return new Promise((resolve) => {
+    const candidates = models.filter((item) => item.kind === 'folder' && item.id !== exclude);
+    const dialog = createModal({
+      title,
+      description: 'Dosyalar seçtiğin modelin klasörüne taşınır. Yalnızca klasör tabanlı modeller listelenir.',
+      iconName: 'folder',
+      body: `
+        <div class="input-group" style="margin-bottom:12px">${icon('search')}<input class="input" type="search" data-q placeholder="Model ara…" aria-label="Model ara"></div>
+        <div class="picker-list scroll-thin" data-results></div>`,
+      footer: '<span class="spacer"></span><button type="button" class="btn btn-ghost" data-close>Vazgeç</button>',
+    });
+    let chosen = null;
+    const input = $('[data-q]', dialog);
+    const results = $('[data-results]', dialog);
+    const render = () => {
+      const query = fold(input.value.trim());
+      const words = query.split(/\s+/).filter(Boolean);
+      const matches = candidates.filter((item) => words.every((word) => (item.search || fold(item.title)).includes(word))).slice(0, 80);
+      results.innerHTML = matches.length ? matches.map((item) => `
+        <button type="button" class="picker-item" data-id="${esc(item.id)}">
+          <span class="picker-thumb">${item.thumb ? `<img src="${esc(item.thumb)}" alt="" loading="lazy">` : icon('box')}</span>
+          <span class="picker-meta"><strong>${esc(item.title)}</strong><small>${esc(categoryLabel(item.category))} · ${item.fileCount} dosya${item.hidden ? ' · gizli' : ''}</small></span>
+        </button>`).join('') : `<p class="field-hint" style="padding:12px 4px">Eşleşen klasör modeli yok.</p>`;
+    };
+    input.addEventListener('input', debounce(render, 90));
+    results.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-id]');
+      if (!button) return;
+      chosen = candidates.find((item) => item.id === button.dataset.id) || null;
+      dialog.close();
+    });
+    dialog.addEventListener('close', () => resolve(chosen));
+    render();
+    setTimeout(() => input.focus(), 50);
+  });
+}
+
+function fileTitle(name) {
+  return name.replace(/\.[^.]+$/, '').replace(/[+_]+/g, ' ').replace(/\s*\(\d+\)\s*$/, '').replace(/\s+/g, ' ').trim() || name;
+}
+
+/**
+ * Bir modelin dosyalarını yeni modellere böl, başka modele taşı veya çöp kutusuna at.
+ * onDone(result): sunucunun yanıtı ({source, created, targets, trashed, ...}).
+ */
+export async function openOrganize(model, { models = [], onDone } = {}) {
+  const dialog = createModal({
+    title: 'Dosyaları düzenle',
+    description: `${model.title} · yanlış gruplanan dosyaları ayır, başka modele taşı veya kopyaları ayıkla`,
+    iconName: 'layers',
+    className: 'modal-wide organize-dialog',
+    body: `<div class="organize-loading"><span class="spinner"></span>Dosyalar ve arşivdeki kopyaları kontrol ediliyor…</div>`,
+    footer: `
+      <span class="organize-summary" data-summary></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn-ghost" data-close>Vazgeç</button>
+      <button type="button" class="btn btn-primary" data-apply disabled>${icon('check')}Uygula</button>`,
+  });
+  let info;
+  try {
+    info = await api(`/api/models/${encodeURIComponent(model.id)}/organize`);
+  } catch (error) {
+    toast(error.message, 'error');
+    dialog.close();
+    return;
+  }
+  if (!dialog.open) return;
+
+  const files = info.files;
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const dest = new Map(files.map((file) => [file.path, 'keep']));
+  const selected = new Set();
+  let groups = [];
+  const targets = [];
+  let counter = 0;
+
+  const newGroup = (title) => {
+    counter += 1;
+    const group = { key: `g${counter}`, title: title.slice(0, 160) };
+    groups.push(group);
+    return group.key;
+  };
+  const targetKey = (card) => {
+    let target = targets.find((item) => item.id === card.id);
+    if (!target) {
+      target = { key: `m:${card.id}`, id: card.id, title: card.title };
+      targets.push(target);
+    }
+    return target.key;
+  };
+  const isModel = (file) => file.kind === 'model';
+  const otherCopies = (file) => file.copies.filter((copy) => !copy.sameModel);
+  const pruneGroups = () => {
+    const used = new Set(dest.values());
+    groups = groups.filter((group) => used.has(group.key));
+  };
+
+  const presets = {
+    smart() {
+      groups = [];
+      dest.forEach((_, path) => dest.set(path, 'keep'));
+      // Modelin adını taşıyan (yoksa ana dosyayı içeren) grup yerinde kalır; model kimliği ve paylaşımları korunur.
+      const sourceTitle = fold(info.title);
+      const titleMatch = info.suggestion.findIndex((group) => fold(group.title) === sourceTitle);
+      const mainGroup = info.suggestion.findIndex((group) => group.files.includes(info.main));
+      const keep = titleMatch >= 0 ? titleMatch : Math.max(0, mainGroup);
+      info.suggestion.forEach((group, index) => {
+        const key = index === keep ? 'keep' : newGroup(group.title);
+        group.files.forEach((path) => dest.set(path, key));
+      });
+      if (info.canTrash) {
+        // Başka bir modelde birebir aynısı olan dosyalar çöpe; aynı modeldeki ikizlerden yalnızca biri kalır.
+        const kept = new Set();
+        for (const file of files) {
+          if (otherCopies(file).length) dest.set(file.path, 'trash');
+          else if (file.copies.some((copy) => copy.sameModel && kept.has(copy.path))) dest.set(file.path, 'trash');
+          else kept.add(file.path);
+        }
+      }
+      pruneGroups();
+    },
+    each() {
+      groups = [];
+      dest.forEach((_, path) => dest.set(path, 'keep'));
+      const byStem = new Map();
+      files.filter(isModel).forEach((file) => {
+        if (file.path === info.main) {
+          byStem.set(fold(fileTitle(file.name)), 'keep');
+          return;
+        }
+        const key = newGroup(file.title || fileTitle(file.name));
+        dest.set(file.path, key);
+        byStem.set(fold(fileTitle(file.name)), key);
+      });
+      files.filter((file) => !isModel(file)).forEach((file) => {
+        dest.set(file.path, byStem.get(fold(fileTitle(file.name))) || 'keep');
+      });
+      pruneGroups();
+    },
+    reset() {
+      groups = [];
+      dest.forEach((_, path) => dest.set(path, 'keep'));
+    },
+  };
+
+  const optionsHtml = (value) => `
+    <option value="keep" ${value === 'keep' ? 'selected' : ''}>Bu modelde kalsın</option>
+    <optgroup label="Yeni model">
+      ${groups.map((group) => `<option value="${group.key}" ${value === group.key ? 'selected' : ''}>＋ ${esc(group.title)}</option>`).join('')}
+      <option value="new">＋ Yeni model oluştur</option>
+    </optgroup>
+    <optgroup label="Başka modele taşı">
+      ${targets.map((target) => `<option value="${target.key}" ${value === target.key ? 'selected' : ''}>→ ${esc(target.title)}</option>`).join('')}
+      <option value="pick">→ Model seç…</option>
+    </optgroup>
+    ${info.canTrash ? `<option value="trash" ${value === 'trash' ? 'selected' : ''}>Çöp kutusuna at</option>` : ''}`;
+
+  $('.modal-body', dialog).innerHTML = `
+    <div class="organize">
+      <div class="organize-presets">
+        <button type="button" class="btn btn-sm" data-preset="smart">${icon('sparkles', 'icon-sm')}Akıllı öneri</button>
+        <button type="button" class="btn btn-sm" data-preset="each">${icon('files', 'icon-sm')}Her dosya ayrı model</button>
+        <button type="button" class="btn btn-sm btn-ghost" data-preset="reset">${icon('refresh-cw', 'icon-sm')}Sıfırla</button>
+        <span class="field-hint">Akıllı öneri, adı benzeyen dosyaları bir arada tutar${info.canTrash ? ' ve arşivde aynısı olanları çöpe ayırır' : ''}. Uygulamadan önce her satırı değiştirebilirsin.</span>
+      </div>
+      <div class="organize-body">
+        <div class="organize-main">
+          <div class="organize-bulk" data-bulk hidden>
+            <label class="organize-check"><input type="checkbox" data-check-all aria-label="Tümünü seç"></label>
+            <span data-bulk-count></span>
+            <select class="select select-sm" data-bulk-dest aria-label="Seçilenleri taşı"></select>
+          </div>
+          <ul class="organize-list scroll-thin" data-list></ul>
+        </div>
+        <aside class="organize-groups scroll-thin" data-groups></aside>
+      </div>
+    </div>`;
+
+  const list = $('[data-list]', dialog);
+  const groupsBox = $('[data-groups]', dialog);
+  const bulk = $('[data-bulk]', dialog);
+  const summary = $('[data-summary]', dialog);
+  const apply = $('[data-apply]', dialog);
+
+  const renderGroups = () => {
+    const counts = new Map();
+    dest.forEach((value) => counts.set(value, (counts.get(value) || 0) + 1));
+    const chips = [
+      ...groups.map((group) => `
+        <div class="organize-group">
+          ${icon('plus', 'icon-sm')}
+          <input class="input input-sm" value="${esc(group.title)}" maxlength="160" data-group-title="${group.key}" aria-label="Yeni model adı">
+          <span class="count">${counts.get(group.key) || 0}</span>
+        </div>`),
+      ...targets.filter((target) => counts.get(target.key)).map((target) => `
+        <div class="organize-group is-target">${icon('arrow-right', 'icon-sm')}<span class="organize-group-title">${esc(target.title)}</span><span class="count">${counts.get(target.key)}</span></div>`),
+    ];
+    groupsBox.innerHTML = `<div class="field-label">Oluşacak modeller ve hedefler${chips.length ? ` <span class="count">${chips.length}</span>` : ''}</div>
+      ${chips.length ? `<div class="organize-group-list">${chips.join('')}</div>`
+        : '<p class="field-hint">Henüz değişiklik yok. Bir dosyanın hedefini “＋ Yeni model oluştur” ya da “→ Model seç…” yap veya Akıllı öneri’yi kullan.</p>'}`;
+  };
+
+  const renderList = () => {
+    list.innerHTML = files.map((file) => {
+      const copies = otherCopies(file);
+      const twin = file.copies.find((copy) => copy.sameModel);
+      const value = dest.get(file.path);
+      return `
+        <li class="organize-row ${value === 'trash' ? 'is-trash' : value === 'keep' ? '' : 'is-moving'}">
+          <label class="organize-check"><input type="checkbox" data-check="${esc(file.path)}" ${selected.has(file.path) ? 'checked' : ''} aria-label="${esc(file.name)} seç"></label>
+          <span class="file-ext ${isModel(file) ? 'is-model' : ''}">${esc(file.format)}</span>
+          <span class="organize-name">
+            <span class="file-name" title="${esc(file.path)}">${esc(file.name)}</span>
+            <span class="file-size">${esc(file.sizeLabel)}${file.path === info.main ? ' · ana dosya' : ''}
+              ${copies.length ? `<span class="badge badge-warning" title="${esc(copies.map((copy) => `${copy.title}: ${copy.path}`).join('\n'))}">${icon('copy', 'icon-xs')}Arşivde var: ${esc(copies[0].title)}${copies.length > 1 ? ` +${copies.length - 1}` : ''}</span>` : ''}
+              ${twin ? `<span class="badge" title="${esc(twin.path)}">${icon('copy', 'icon-xs')}Bu modelde aynısı var</span>` : ''}
+              ${file.shared ? '<span class="badge">Ortak dosya</span>' : ''}
+            </span>
+          </span>
+          <select class="select select-sm" data-dest="${esc(file.path)}" ${file.shared ? 'disabled' : ''} aria-label="${esc(file.name)} nereye">${optionsHtml(value)}</select>
+        </li>`;
+    }).join('');
+  };
+
+  const renderSummary = () => {
+    const values = [...dest.values()];
+    const moving = values.filter((value) => value.startsWith('m:')).length;
+    const trashed = values.filter((value) => value === 'trash').length;
+    const remainingModels = files.filter((file) => isModel(file) && dest.get(file.path) === 'keep').length;
+    const changes = values.filter((value) => value !== 'keep').length;
+    const parts = [];
+    if (groups.length) parts.push(`${groups.length} yeni model`);
+    if (moving) parts.push(`${moving} dosya başka modele`);
+    if (trashed) parts.push(`${trashed} dosya çöpe`);
+    if (changes) parts.push(remainingModels ? `${remainingModels} model dosyası burada kalıyor` : '<strong>bu model kaldırılacak</strong>');
+    summary.innerHTML = changes ? parts.join(' · ') : 'Henüz değişiklik yok';
+    summary.classList.toggle('is-warning', Boolean(changes) && !remainingModels);
+    apply.disabled = !changes;
+    bulk.hidden = false;
+    $('[data-bulk-count]', dialog).textContent = selected.size ? `${selected.size} dosya seçili →` : 'Seçtiklerini topluca taşı:';
+    const bulkSelect = $('[data-bulk-dest]', dialog);
+    bulkSelect.disabled = !selected.size;
+    bulkSelect.innerHTML = `<option value="" selected disabled>Hedef seç…</option>${optionsHtml('')}`;
+    $('[data-check-all]', dialog).checked = selected.size === files.length && files.length > 0;
+  };
+
+  const render = () => {
+    pruneGroups();
+    renderGroups();
+    renderList();
+    renderSummary();
+  };
+
+  const assign = async (paths, value, select) => {
+    let key = value;
+    if (value === 'new') {
+      const first = byPath.get(paths[0]);
+      key = newGroup(first.title || fileTitle(first.name));
+    } else if (value === 'pick') {
+      const card = await pickModel({ models, exclude: model.id, title: paths.length > 1 ? `${paths.length} dosya için hedef model` : `“${byPath.get(paths[0]).name}” için hedef model` });
+      if (!card) {
+        if (select) select.value = dest.get(paths[0]);
+        return;
+      }
+      key = targetKey(card);
+    }
+    paths.forEach((path) => dest.set(path, key));
+    render();
+  };
+
+  dialog.addEventListener('click', (event) => {
+    const preset = event.target.closest('[data-preset]');
+    if (preset) {
+      presets[preset.dataset.preset]();
+      render();
+    }
+  });
+  dialog.addEventListener('change', (event) => {
+    const target = event.target;
+    if (target.matches('[data-dest]')) assign([target.dataset.dest], target.value, target);
+    else if (target.matches('[data-bulk-dest]') && target.value && selected.size) assign([...selected], target.value, null);
+    else if (target.matches('[data-check]')) {
+      if (target.checked) selected.add(target.dataset.check);
+      else selected.delete(target.dataset.check);
+      renderSummary();
+    } else if (target.matches('[data-check-all]')) {
+      files.forEach((file) => (target.checked && !file.shared ? selected.add(file.path) : selected.delete(file.path)));
+      renderList();
+      renderSummary();
+    } else if (target.matches('[data-group-title]')) {
+      const group = groups.find((item) => item.key === target.dataset.groupTitle);
+      if (group) group.title = target.value.trim() || group.title;
+      renderList();
+    }
+  });
+
+  apply.addEventListener('click', async () => {
+    const payload = { groups: [], moves: [], trash: [] };
+    for (const group of groups) {
+      const paths = files.filter((file) => dest.get(file.path) === group.key).map((file) => file.path);
+      if (!paths.some((path) => isModel(byPath.get(path)))) {
+        toast(`“${group.title}” içinde 3D model dosyası yok; görselleri bir model dosyasıyla birlikte taşı`, 'error', { duration: 6000 });
+        return;
+      }
+      payload.groups.push({ title: group.title, files: paths });
+    }
+    for (const target of targets) {
+      const paths = files.filter((file) => dest.get(file.path) === target.key).map((file) => file.path);
+      if (paths.length) payload.moves.push({ target: target.id, files: paths });
+    }
+    payload.trash = files.filter((file) => dest.get(file.path) === 'trash').map((file) => file.path);
+    apply.disabled = true;
+    apply.innerHTML = '<span class="spinner"></span>Uygulanıyor…';
+    try {
+      const result = await api(`/api/models/${encodeURIComponent(model.id)}/organize`, { method: 'POST', body: payload });
+      const parts = [];
+      if (result.created.length) parts.push(`${result.created.length} yeni model`);
+      if (result.targets.length) parts.push(`${result.targets.length} modele dosya taşındı`);
+      if (result.trashed) parts.push(`${result.trashed} dosya çöp kutusunda`);
+      toast(parts.join(' · ') || 'Güncellendi', 'success', { duration: 5000 });
+      dialog.close();
+      onDone?.(result);
+    } catch (error) {
+      toast(error.message, 'error', { duration: 6000 });
+      apply.disabled = false;
+      apply.innerHTML = `${icon('check')}Uygula`;
+    }
+  });
+
+  render();
 }
 
 // ─── Düzenleme ──────────────────────────────────────────────────────

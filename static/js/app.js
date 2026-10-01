@@ -8,7 +8,7 @@ import {
   toggleTheme,
 } from './core.js';
 import { DetailView } from './detail.js';
-import { openAccount, openEdit, openLogin, openSettings, openShare, openUpload, renderLockedScreen } from './admin.js';
+import { openAccount, openEdit, openLogin, openOrganize, openSettings, openShare, openUpload, renderLockedScreen } from './admin.js';
 
 const PAGE_SIZE = 48;
 const RECENT_DAYS = 30;
@@ -563,6 +563,11 @@ function ensureDetail() {
     onEdit: (model) => openEdit(model, { allTags: allTags().map(([tag]) => tag), onSaved: (updated) => { mergeCard(updated); renderDetail(updated); } }),
     onUpload: (model) => openUpload({ target: model, allTags: allTags().map(([tag]) => tag), onDone: async (_, { open }) => { await loadLibrary({ quiet: true }); if (open) refreshDetail(); } }),
     onDeleted: (model) => trashModel(model),
+    onOrganize: (model) => openOrganize(model, {
+      models: state.models,
+      admin: state.admin,
+      onDone: (result) => afterOrganize(model, result),
+    }),
     onOpenModel: (id) => openDetail(id),
     onTag: (tag) => { closeDetail(); setFilter({ tag, category: null, view: 'all' }); },
   });
@@ -672,6 +677,19 @@ function closeDetail({ fromHistory = false } = {}) {
     } else {
       syncUrl();
     }
+  }
+}
+
+async function afterOrganize(model, result) {
+  await loadLibrary({ quiet: false });
+  if (result.source) {
+    if (state.detailId === model.id) refreshDetail();
+  } else if (result.created?.[0]) {
+    openDetail(result.created[0]);
+  } else if (result.targets?.[0]) {
+    openDetail(result.targets[0]);
+  } else {
+    closeDetail();
   }
 }
 
@@ -893,8 +911,17 @@ function bindEvents() {
     }
     if (typing) return;
     if (el.detailDialog.open) {
-      if (event.key === 'ArrowLeft') navigateDetail(-1);
-      if (event.key === 'ArrowRight') navigateDetail(1);
+      if (document.querySelector('dialog.modal:not(.viewer-dialog)[open]')) return;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        const direction = event.key === 'ArrowLeft' ? -1 : 1;
+        // Shift + ok: aynı modelin parçaları arasında; düz ok: modeller arasında.
+        if (event.shiftKey) {
+          event.preventDefault();
+          detail?.stepPart(direction);
+        } else {
+          navigateDetail(direction);
+        }
+      }
       return;
     }
     if (event.key === 'u' && state.canEdit && !document.querySelector('dialog[open]')) startUpload();

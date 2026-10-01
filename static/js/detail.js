@@ -28,11 +28,21 @@ function autoLoadLimit() {
 }
 
 export class DetailView {
-  constructor({ root, mode = 'modal', role = null, onClose, onNavigate, onUpdated, onShare, onEdit, onUpload, onDeleted, onOpenModel, onTag }) {
+  constructor({ root, mode = 'modal', role = null, onClose, onNavigate, onUpdated, onShare, onEdit, onUpload, onDeleted, onOpenModel, onTag, onOrganize }) {
     this.root = root;
     this.mode = mode;
     this.setRole(role);
-    this.handlers = { onClose, onNavigate, onUpdated, onShare, onEdit, onUpload, onDeleted, onOpenModel, onTag };
+    this.handlers = { onClose, onNavigate, onUpdated, onShare, onEdit, onUpload, onDeleted, onOpenModel, onTag, onOrganize };
+    // Parça önizlemeleri sunucuda ilk istekte üretilir (202); hazır olana kadar birkaç kez yeniden denenir.
+    root.addEventListener('error', (event) => {
+      const image = event.target;
+      if (image.tagName !== 'IMG') return;
+      if (image.classList.contains('part-img')) this.retryPartImage(image);
+      else if (image.classList.contains('stage-poster')) image.remove();
+    }, true);
+    root.addEventListener('load', (event) => {
+      if (event.target.classList?.contains('part-img')) event.target.closest('.part-media')?.classList.add('has-image');
+    }, true);
     this.model = null;
     this.viewer = null;
     this.current = null;
@@ -86,6 +96,7 @@ export class DetailView {
       ? 'Tümünü indir' : 'İndir';
     const downloadHref = model.fileCount > 1 || model.kind === 'archive' ? model.downloadAllUrl : (model.main.downloadUrl || model.downloadAllUrl);
     const platform = PLATFORM_LABELS[model.platform];
+    const multi = model.files.length > 1;
 
     const fileValue = model.assets.length ? `${model.fileCount} + ${model.assets.length} ek` : `${model.fileCount} model`;
     const formatValue = model.formats.map((item) => item.toUpperCase()).join(' · ');
@@ -109,12 +120,17 @@ export class DetailView {
             <div class="stage-image" data-stage-image hidden><img alt=""></div>
             <div class="stage-overlay" data-stage-overlay hidden></div>
             <div class="stage-top">
-              <div class="menu-wrap">
-                <button type="button" class="stage-file" data-action="pick-file" ${model.files.length > 1 ? '' : 'disabled'} aria-haspopup="menu" title="${model.files.length > 1 ? 'Parça seç' : ''}">
-                  ${icon('box', 'icon-sm')}<span data-stage-name>${esc(model.main.name)}</span>
-                  <span class="stage-dims" data-stage-dims></span>
-                  ${model.files.length > 1 ? icon('chevron-down', 'icon-xs') : ''}
-                </button>
+              <div class="stage-parts">
+                ${multi ? `<button type="button" class="stage-step" data-action="part-prev" title="Önceki parça (Shift + ←)" aria-label="Önceki parça">${icon('chevron-left', 'icon-sm')}</button>` : ''}
+                <div class="menu-wrap">
+                  <button type="button" class="stage-file" data-action="pick-file" ${multi ? '' : 'disabled'} aria-haspopup="menu" title="${multi ? 'Parça seç' : ''}">
+                    ${icon('box', 'icon-sm')}<span data-stage-name>${esc(model.main.name)}</span>
+                    ${multi ? '<span class="stage-count" data-stage-count></span>' : ''}
+                    <span class="stage-dims" data-stage-dims></span>
+                    ${multi ? icon('chevron-down', 'icon-xs') : ''}
+                  </button>
+                </div>
+                ${multi ? `<button type="button" class="stage-step" data-action="part-next" title="Sonraki parça (Shift + →)" aria-label="Sonraki parça">${icon('chevron-right', 'icon-sm')}</button>` : ''}
               </div>
             </div>
             ${this.mode === 'modal' ? `
@@ -132,9 +148,17 @@ export class DetailView {
               <button type="button" class="tool-btn" data-action="fullscreen" title="Tam ekran" aria-label="Tam ekran">${icon('maximize')}</button>
             </div>
           </div>
-          ${hasImages ? `
-            <div class="gallery-strip scroll-thin" role="toolbar" aria-label="Görseller">
-              <button type="button" class="gallery-thumb" data-action="show-3d" aria-pressed="true" title="3D görünüm">3D</button>
+          ${multi || hasImages ? `
+            <div class="gallery-strip scroll-thin" data-strip role="toolbar" aria-label="${multi ? 'Parçalar ve görseller' : 'Görseller'}">
+              ${multi ? model.files.map((entry, index) => `
+                <button type="button" class="part-thumb" data-action="view-part" data-index="${index}" aria-pressed="false" title="${esc(entry.name)} · ${esc(entry.sizeLabel)}">
+                  <span class="part-media">
+                    ${entry.thumbUrl ? `<img class="part-img" src="${esc(entry.thumbUrl)}" alt="" loading="lazy" decoding="async">` : ''}
+                    <span class="part-ext">${esc(entry.format)}</span>
+                  </span>
+                  <span class="part-label">${esc(entry.name.replace(/\.[^.]+$/, ''))}</span>
+                </button>`).join('') : '<button type="button" class="gallery-thumb" data-action="show-3d" aria-pressed="true" title="3D görünüm">3D</button>'}
+              ${multi && hasImages ? '<span class="strip-sep" aria-hidden="true"></span>' : ''}
               ${model.images.map((image, index) => `
                 <button type="button" class="gallery-thumb" data-action="show-image" data-index="${index}" aria-pressed="false" title="${esc(image.name)}">
                   <img src="${esc(image.url)}" alt="" loading="lazy">
@@ -210,7 +234,12 @@ export class DetailView {
               </div>` : ''}
 
             <div class="section">
-              <h3 class="section-title">Dosyalar <span class="count">${model.files.length + model.assets.length}</span></h3>
+              <h3 class="section-title">Dosyalar
+                <span class="section-tail">
+                  ${admin && model.kind !== 'archive' && this.handlers.onOrganize ? `<button type="button" class="link-btn section-action" data-action="organize" title="Dosyaları ayrı modellere böl, başka modele taşı veya kopyaları ayıkla">${icon('layers', 'icon-xs')}Düzenle</button>` : ''}
+                  <span class="count">${model.files.length + model.assets.length}</span>
+                </span>
+              </h3>
               ${this.filesTemplate(model)}
             </div>
 
@@ -252,15 +281,18 @@ export class DetailView {
           ${entries.map((entry) => {
             const isCurrent = this.current && entry.path === this.current.path && entry.member === this.current.member;
             const index = [...model.files, ...model.assets].indexOf(entry);
+            const action = entry.viewable ? 'view-file' : entry.kind === 'image' ? 'view-image-file' : '';
+            const inner = `
+                  <span class="file-ext ${entry.kind === 'model' ? 'is-model' : ''}">${esc(entry.format || '?')}</span>
+                  <span class="file-meta">
+                    <span class="file-name">${esc(entry.name)}</span>
+                    <span class="file-size">${esc(entry.sizeLabel)}${isCurrent ? ' · <strong>görüntüleniyor</strong>' : ''}</span>
+                  </span>`;
             return `
-              <li class="file-row ${isCurrent ? 'is-current' : ''}">
-                <span class="file-ext ${entry.kind === 'model' ? 'is-model' : ''}">${esc(entry.format || '?')}</span>
-                <div class="file-meta">
-                  <div class="file-name" title="${esc(entry.member || entry.path)}">${esc(entry.name)}</div>
-                  <div class="file-size">${esc(entry.sizeLabel)}</div>
-                </div>
-                ${entry.viewable ? `<button type="button" class="btn btn-ghost btn-sm btn-icon" data-action="view-file" data-index="${index}" title="Görüntüle" aria-label="${esc(entry.name)} dosyasını görüntüle">${icon('eye', 'icon-sm')}</button>` : ''}
-                ${entry.kind === 'image' ? `<button type="button" class="btn btn-ghost btn-sm btn-icon" data-action="view-image-file" data-index="${index}" title="Göster" aria-label="Görseli göster">${icon('image', 'icon-sm')}</button>` : ''}
+              <li class="file-row ${isCurrent ? 'is-current' : ''}" data-file-index="${index}">
+                ${action
+                  ? `<button type="button" class="file-main" data-action="${action}" data-index="${index}" title="${esc(entry.member || entry.path)}" aria-label="${esc(entry.name)} ${action === 'view-file' ? '3D görüntüle' : 'görseli göster'}">${inner}${icon(action === 'view-file' ? 'eye' : 'image', 'icon-sm file-go')}</button>`
+                  : `<div class="file-main" title="${esc(entry.member || entry.path)}">${inner}</div>`}
                 ${entry.url && ['document', 'readme', 'license'].includes(entry.kind) ? `<a class="btn btn-ghost btn-sm btn-icon" href="${esc(entry.url)}" target="_blank" rel="noopener" title="Aç" aria-label="Aç">${icon('external-link', 'icon-sm')}</a>` : ''}
                 ${entry.downloadUrl ? `<a class="btn btn-ghost btn-sm btn-icon" href="${esc(entry.downloadUrl)}" download title="İndir" aria-label="${esc(entry.name)} indir">${icon('download', 'icon-sm')}</a>` : ''}
               </li>`;
@@ -319,19 +351,81 @@ export class DetailView {
     overlay.innerHTML = html || '';
   }
 
-  poster() {
+  poster(entry = null) {
     const model = this.model;
-    const src = model.thumb || model.mainPreview;
+    const isMain = !entry || (entry.path === model.main.path && entry.member === model.main.member);
+    const src = (!isMain && entry.thumbUrl) || model.thumb || model.mainPreview;
     return src ? `<img class="stage-poster" src="${esc(src)}" alt="">` : `<div class="empty-art">${icon('box', 'icon-xl')}</div>`;
+  }
+
+  isCurrent(entry) {
+    return Boolean(entry && this.current && entry.path === this.current.path && entry.member === this.current.member);
+  }
+
+  partIndex() {
+    return this.model.files.findIndex((entry) => this.isCurrent(entry));
   }
 
   markCurrentFile() {
     const all = [...this.model.files, ...this.model.assets];
     this.root.querySelectorAll('.file-row').forEach((row) => {
-      const button = row.querySelector('[data-action="view-file"]');
-      const entry = button ? all[Number(button.dataset.index)] : null;
-      row.classList.toggle('is-current', Boolean(entry && this.current && entry.path === this.current.path && entry.member === this.current.member));
+      const entry = all[Number(row.dataset.fileIndex)];
+      const current = entry?.viewable && this.isCurrent(entry);
+      row.classList.toggle('is-current', Boolean(current));
+      const size = row.querySelector('.file-size');
+      if (size && entry) size.innerHTML = `${esc(entry.sizeLabel)}${current ? ' · <strong>görüntüleniyor</strong>' : ''}`;
     });
+    const index = this.partIndex();
+    const count = $('[data-stage-count]', this.root);
+    if (count) count.textContent = index >= 0 ? `${index + 1}/${this.model.files.length}` : '';
+    const strip = $('[data-strip]', this.root);
+    strip?.querySelectorAll('.part-thumb').forEach((chip) => {
+      const active = Number(chip.dataset.index) === index;
+      chip.setAttribute('aria-pressed', String(active));
+      // Yalnızca şeridin kendisini yatay kaydır; üst kapsayıcıları (panel, pencere) oynatma.
+      if (active && strip.scrollWidth > strip.clientWidth) {
+        const left = chip.offsetLeft - (strip.clientWidth - chip.offsetWidth) / 2;
+        strip.scrollTo({ left: Math.max(0, left), behavior: 'smooth' });
+      }
+    });
+  }
+
+  stepPart(direction) {
+    const files = this.model?.files || [];
+    if (files.length < 2) return;
+    const index = this.partIndex();
+    const next = files[((index < 0 ? 0 : index + direction) + files.length) % files.length];
+    this.showFile(next);
+  }
+
+  retryPartImage(image) {
+    const tries = Number(image.dataset.tries || 0) + 1;
+    if (tries > 8) {
+      image.remove();
+      return;
+    }
+    image.dataset.tries = String(tries);
+    const base = image.dataset.base || image.getAttribute('src');
+    image.dataset.base = base;
+    setTimeout(() => {
+      if (image.isConnected) image.src = `${base}${base.includes('?') ? '&' : '?'}r=${tries}`;
+    }, Math.min(1500 * tries, 6000));
+  }
+
+  revealStage() {
+    // Dar ekranda sahne yukarıda kalır: yalnızca dikey kaydırarak sahneyi görünür yap.
+    const rect = this.stage.getBoundingClientRect();
+    if (rect.top >= 0 && rect.top < window.innerHeight * 0.4) return;
+    let node = this.stage.parentElement;
+    while (node && node !== document.body) {
+      const style = getComputedStyle(node);
+      if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) {
+        node.scrollBy({ top: rect.top - node.getBoundingClientRect().top - 8, behavior: 'smooth' });
+        return;
+      }
+      node = node.parentElement;
+    }
+    window.scrollBy({ top: rect.top - 72, behavior: 'smooth' });
   }
 
   showFile(entry, { force = false, keepLoaded = false } = {}) {
@@ -361,7 +455,7 @@ export class DetailView {
     if (!entry.viewable) {
       this.viewer.detach();
       if (toolbar) toolbar.hidden = true;
-      this.setOverlay(`${this.poster()}<p><strong>${esc(entry.format.toUpperCase())}</strong> dosyası tarayıcıda 3D olarak önizlenemiyor.</p>
+      this.setOverlay(`${this.poster(entry)}<p><strong>${esc(entry.format.toUpperCase())}</strong> dosyası tarayıcıda 3D olarak önizlenemiyor.</p>
         ${entry.downloadUrl ? `<a class="btn btn-soft" href="${esc(entry.downloadUrl)}" download>${icon('download')}Dosyayı indir</a>` : ''}`);
       return;
     }
@@ -373,7 +467,7 @@ export class DetailView {
     if (!force && entry.size > autoLoadLimit()) {
       this.viewer.detach();
       if (toolbar) toolbar.hidden = true;
-      this.setOverlay(`${this.poster()}
+      this.setOverlay(`${this.poster(entry)}
         <p>Bu parça <strong>${esc(entry.sizeLabel)}</strong>. 3D önizleme için dosyanın indirilmesi gerekiyor.</p>
         <button type="button" class="btn btn-primary" data-action="load-anyway">${icon('move-3d')}3D önizlemeyi yükle</button>`);
       return;
@@ -410,7 +504,7 @@ export class DetailView {
         this.setOverlay(`<img class="stage-poster" src="${esc(this.model.mainPreview)}" alt=""><p>3D mesh açılamadı; dosyadaki gömülü önizleme gösteriliyor.</p>`);
         return;
       }
-      this.setOverlay(`${this.poster()}<p>${esc(error?.message || 'Model yüklenemedi')}</p>
+      this.setOverlay(`${this.poster(entry)}<p>${esc(error?.message || 'Model yüklenemedi')}</p>
         <button type="button" class="btn btn-soft" data-action="retry">${icon('refresh-cw')}Tekrar dene</button>`);
     });
   }
@@ -423,6 +517,7 @@ export class DetailView {
     const pane = $('[data-stage-image]', this.root);
     if (!pane) return;
     this.viewer.stop();
+    this.root.querySelectorAll('.part-thumb').forEach((chip) => chip.setAttribute('aria-pressed', 'false'));
     pane.hidden = false;
     pane.querySelector('img').src = image.url;
     pane.querySelector('img').alt = image.name;
@@ -464,8 +559,21 @@ export class DetailView {
       case 'share': this.handlers.onShare?.(model); break;
       case 'load-anyway': this.showFile(this.current, { force: true }); break;
       case 'retry': this.showFile(this.current, { force: true }); break;
-      case 'view-file': this.showFile(all[Number(target.dataset.index)], { force: true }); this.stage.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); break;
-      case 'view-image-file': this.showImage(all[Number(target.dataset.index)]); break;
+      case 'view-file': {
+        const entry = all[Number(target.dataset.index)];
+        this.showFile(entry, { keepLoaded: this.isCurrent(entry) });
+        this.revealStage();
+        break;
+      }
+      case 'view-part': {
+        const entry = model.files[Number(target.dataset.index)];
+        this.showFile(entry, { keepLoaded: this.isCurrent(entry) });
+        break;
+      }
+      case 'part-prev': this.stepPart(-1); break;
+      case 'part-next': this.stepPart(1); break;
+      case 'organize': this.handlers.onOrganize?.(model); break;
+      case 'view-image-file': this.showImage(all[Number(target.dataset.index)]); this.revealStage(); break;
       case 'show-3d': this.showFile(this.current, { keepLoaded: true }); break;
       case 'show-image': {
         this.root.querySelectorAll('.gallery-thumb').forEach((thumb) => thumb.setAttribute('aria-pressed', String(thumb === target)));
@@ -548,9 +656,9 @@ export class DetailView {
       label: `${entry.name} · ${entry.sizeLabel}`,
       icon: entry.viewable ? 'box' : 'file',
       checked: this.current && entry.path === this.current.path && entry.member === this.current.member,
-      onClick: () => this.showFile(entry, { force: true }),
+      onClick: () => this.showFile(entry),
     }));
-    openMenu(trigger, [{ heading: 'Parçalar' }, ...items], { align: 'left' });
+    openMenu(trigger, [{ heading: `Parçalar · ${items.length}` }, ...items], { align: 'left' });
   }
 
   openMoreMenu(trigger) {
@@ -558,6 +666,7 @@ export class DetailView {
     const items = [
       { label: 'Bilgileri düzenle', icon: 'pencil', onClick: () => this.handlers.onEdit?.(model) },
       model.kind === 'folder' && { label: 'Dosya ekle', icon: 'file-plus', onClick: () => this.handlers.onUpload?.(model) },
+      model.kind !== 'archive' && this.handlers.onOrganize && { label: 'Dosyaları düzenle / böl', icon: 'layers', onClick: () => this.handlers.onOrganize(model) },
       { label: 'Önizlemeyi yeniden oluştur', icon: 'refresh-cw', onClick: () => this.refreshThumbnail() },
       this.isAdmin && { separator: true },
       this.isAdmin && { label: 'Çöp kutusuna taşı', icon: 'trash-2', danger: true, onClick: () => this.handlers.onDeleted?.(model) },

@@ -825,6 +825,113 @@ def scan_library(models_dir):
     return catalog
 
 
+# ─── Gruplama önerisi ─────────────────────────────────────────────────
+
+COPY_SUFFIX = re.compile(r'(?i)(?:\s*[(\[]\d{1,3}[)\]]|\s*[-_ ]\s*(?:copy|kopya|kopyası)(?:\s*\d+)?)+\s*$')
+_GROUP_STOPWORDS = {'the', 'a', 'an', 'of', 'for', 'and', 'with', 've', 'ile', 'stl', 'model', 'print', 'file', 'final', 'new', 'yeni'}
+_NUMERIC_WORD = re.compile(r'v?\d+(?:[.,]\d+)*[a-z]?|\d+(?:mm|cm)')
+# Aynı tasarımın parçalarını ayıran kelimeler: 'Mini LH Side' / 'Mini Roll Top' → 'Mini'.
+_PART_WORDS = {
+    'left', 'right', 'lh', 'rh', 'top', 'bottom', 'upper', 'lower', 'front', 'back', 'rear', 'side', 'sides',
+    'base', 'lid', 'cap', 'cover', 'body', 'part', 'parts', 'piece', 'button', 'buttons', 'knob', 'handle', 'door',
+    'wheel', 'wheels', 'arm', 'arms', 'leg', 'legs', 'head', 'tail', 'inner', 'outer', 'insert', 'frame', 'hinge',
+    'pin', 'pins', 'screw', 'screws', 'nut', 'nuts', 'bolt', 'spring', 'plate', 'shell', 'roll', 'surround',
+    'assembly', 'half', 'sol', 'sag', 'ust', 'alt', 'kapak', 'govde', 'parca',
+}
+
+
+def _group_signature(name):
+    """Dosya adından (başlık, kelimeler, sıkıştırılmış anahtar) üret; kopya ekleri ve sürümler atılır."""
+    title = COPY_SUFFIX.sub('', clean_title(name, is_file=True)[0]).strip(' -_') or name
+    words = re.findall(r'[a-z0-9]+', categories.fold(title))
+    meaningful = [word for word in words if not _NUMERIC_WORD.fullmatch(word) and word not in _GROUP_STOPWORDS]
+    compact = re.sub(r'(?:v?\d+)+$', '', ''.join(words))
+    return title, meaningful, compact
+
+
+def _common_title(titles):
+    """Başlıkların ortak kelime önekini döndür ('Key Cover beyaz', 'Key Cover ofis' → 'Key Cover')."""
+    split = [title.split() for title in titles]
+    common = []
+    for column in zip(*split):
+        if len({categories.fold(word) for word in column}) != 1:
+            break
+        common.append(column[0])
+    text = ' '.join(common).strip(' -_,')
+    return text if len(text) >= 3 else titles[0]
+
+
+def suggest_groups(names, titles=None):
+    """
+    Birbirinden bağımsız yüklenen dosyaları olası modellere ayır.
+    İlk iki anlamlı kelimesi aynı olanlar ('Key Cover beyaz' / 'Key Cover ofis'), kopya ve sürüm
+    ekleri dışında aynı adı taşıyanlar ('SYFS V2' / 'SYFSV2', 'Parça (1)' / 'Parça') aynı gruba düşer.
+    Model olmayan dosyalar (görsel, PDF...) aynı adlı modelin grubuna, yoksa ilk gruba eklenir.
+    titles: {dosya_adı: daha iyi başlık} (ör. 3MF içindeki başlık; tek dosyalı gruplarda kullanılır).
+    [{'title': str, 'files': [index, ...]}] döndürür.
+    """
+    titles = titles or {}
+    parent = {}
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    model_indexes = [index for index, name in enumerate(names) if Path(name).suffix.lower() in MODEL_FORMATS | {'.zip'}]
+    signatures = {index: _group_signature(Path(names[index]).name) for index in model_indexes}
+    owners = {}
+    for index in model_indexes:
+        parent[index] = index
+        _title, words, compact = signatures[index]
+        keys = []
+        if len(words) >= 2:
+            keys.append('w:' + ' '.join(words[:2]))
+        elif words and len(words[0]) >= 5:
+            keys.append('w:' + words[0])
+        if len(compact) >= 4:
+            keys.append('c:' + compact)
+        core = [word for word in words if word not in _PART_WORDS]
+        if core and len(core) < len(words) and len(' '.join(core[:2])) >= 3:
+            keys.append('p:' + ' '.join(core[:2]))
+        for key in keys:
+            if key in owners:
+                parent[find(index)] = find(owners[key])
+            else:
+                owners[key] = index
+
+    groups = {}
+    for index in model_indexes:
+        groups.setdefault(find(index), []).append(index)
+    ordered = sorted(groups.values(), key=lambda members: min(members))
+
+    result = []
+    by_compact = {}
+    for members in ordered:
+        if len(members) == 1 and titles.get(names[members[0]]):
+            title = titles[names[members[0]]]
+        else:
+            # Ortak önek yoksa en okunur başlık: kopya eki taşımayan, en çok kelimeli, en kısa.
+            ranked = sorted(members, key=lambda index: (
+                bool(COPY_SUFFIX.search(clean_title(Path(names[index]).name, is_file=True)[0])),
+                -len(signatures[index][0].split()), len(signatures[index][0]),
+            ))
+            title = _common_title([signatures[index][0] for index in ranked])
+        result.append({'title': title[:160], 'files': list(members)})
+        for index in members:
+            by_compact.setdefault(signatures[index][2], len(result) - 1)
+
+    for index, name in enumerate(names):
+        if index in signatures:
+            continue
+        compact = _group_signature(Path(name).name)[2]
+        if not result:
+            break
+        result[by_compact.get(compact, 0)]['files'].append(index)
+    return result
+
+
 def library_signature(models_dir):
     """Dosya sistemindeki değişiklikleri ucuzca tespit etmek için imza üret."""
     digest = hashlib.md5()

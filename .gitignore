@@ -53,6 +53,8 @@ db.*.json
 thumbnails/
 .uploads/
 .trash/
+# Bakim yedekleri ve yeniden gruplama planlari (kutuphane dosya adlarini icerir)
+.backups/
 
 # Buyuk dosyalar ve 3D model formatlari (push timeout onlemek icin)
 *.stl

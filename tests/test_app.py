@@ -698,6 +698,189 @@ class UploadTests(ApiTestCase):
         self.assertEqual(response.get_json()['models'][0]['fileCount'], 2)
 
 
+class GroupSuggestionTests(unittest.TestCase):
+    def titles(self, names):
+        return {group['title']: sorted(names[index] for index in group['files']) for group in catalog.suggest_groups(names)}
+
+    def test_related_names_share_a_group_and_unrelated_stay_apart(self):
+        names = [
+            'Amazing Juttuli (1).stl', 'Amazing Juttuli.stl', 'Powerful Juttuli-Luulia.stl',
+            'KeyCover_beyaz_kapı.stl', 'KeyCover_ofis.stl', 'Kwikset Key Cover_27.stl',
+            'SYFS V2.stl', 'SYFSV2.stl', 'Bat-Cat-Easy.stl', 'Bat-Cat-Easy.png', 'lithophane (1).3mf', 'lithophane.3mf',
+        ]
+        groups = self.titles(names)
+        self.assertEqual(groups['Amazing Juttuli'], ['Amazing Juttuli (1).stl', 'Amazing Juttuli.stl'])
+        self.assertEqual(groups['Key Cover'], ['KeyCover_beyaz_kapı.stl', 'KeyCover_ofis.stl'])
+        self.assertEqual(groups['SYFS V2'], ['SYFS V2.stl', 'SYFSV2.stl'])
+        self.assertEqual(groups['Bat Cat Easy'], ['Bat-Cat-Easy.png', 'Bat-Cat-Easy.stl'])
+        self.assertEqual(groups['Lithophane'], ['lithophane (1).3mf', 'lithophane.3mf'])
+        self.assertIn('Powerful Juttuli-Luulia', groups)
+        self.assertIn('Kwikset Key Cover 27', groups)
+
+    def test_part_words_keep_pieces_of_one_design_together(self):
+        names = ['Mini+Button.stl', 'Mini+LH+Side.stl', 'Mini+Roll+Top (1).stl', 'Pencil+Case+Left+Side.stl',
+                 'Pencil+Case+Surround.stl', 'base.stl']
+        groups = self.titles(names)
+        self.assertEqual(groups['Mini'], ['Mini+Button.stl', 'Mini+LH+Side.stl', 'Mini+Roll+Top (1).stl'])
+        self.assertEqual(groups['Pencil Case'], ['Pencil+Case+Left+Side.stl', 'Pencil+Case+Surround.stl'])
+        self.assertEqual(groups['Base'], ['base.stl'])
+
+    def test_single_files_use_better_titles_and_stray_assets_join_first_group(self):
+        names = ['print+file.3mf', 'README.txt']
+        groups = catalog.suggest_groups(names, {'print+file.3mf': 'Squirrel Hanger'})
+        self.assertEqual(groups, [{'title': 'Squirrel Hanger', 'files': [0, 1]}])
+        self.assertEqual(catalog.suggest_groups(['notlar.pdf']), [])
+
+
+class OrganizeTests(ApiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.bundle = self.models / 'Karışık'
+        for name, size in (('Amazing Juttuli.stl', 10), ('Amazing Juttuli (1).stl', 11), ('Bat-Cat-Easy.stl', 12),
+                           ('Kapak.stl', 13), ('Kutu kopyası.stl', 20)):
+            write_stl(self.bundle / name, size)
+        (self.bundle / 'Bat-Cat-Easy.png').write_bytes(PNG_1X1)
+        self.library.scan()
+        self.source = self.model_id('Karışık')
+        self.library.update_model(self.source, {'hidden': True})
+        self.login()
+
+    def organize(self, payload, model_id=None):
+        return self.post(f'/api/models/{model_id or self.source}/organize', payload)
+
+    def test_organize_info_lists_copies_and_suggestion(self):
+        info = self.client.get(f'/api/models/{self.source}/organize').get_json()
+        copy = next(item for item in info['files'] if item['name'] == 'Kutu kopyası.stl')
+        # Kurulumdaki Anahtarlık.stl de aynı küp: ikisi de kopya olarak bulunmalı.
+        self.assertEqual(sorted((item['modelId'], item['path']) for item in copy['copies']),
+                         sorted([(self.model_id('Kutu'), 'Kutu/box.stl'), (self.model_id('Anahtarlık.stl'), 'Anahtarlık.stl')]))
+        self.assertEqual(next(item for item in info['files'] if item['name'] == 'Kapak.stl')['copies'], [])
+        titles = {group['title'] for group in info['suggestion']}
+        self.assertTrue({'Amazing Juttuli', 'Bat Cat Easy', 'Kapak'} <= titles)
+        self.assertTrue(info['canTrash'])
+
+    def test_split_creates_hidden_models_and_keeps_the_rest(self):
+        result = self.organize({'groups': [
+            {'title': 'Amazing Juttuli', 'files': ['Karışık/Amazing Juttuli.stl', 'Karışık/Amazing Juttuli (1).stl']},
+            {'title': 'Yarasa: Kedi', 'files': ['Karışık/Bat-Cat-Easy.stl', 'Karışık/Bat-Cat-Easy.png']},
+        ]})
+        self.assertEqual(result.status_code, 200, result.get_json())
+        data = result.get_json()
+        self.assertEqual(data['source'], self.source)
+        self.assertEqual(len(data['created']), 2)
+        juttuli = self.model_id('Amazing Juttuli')
+        bat = self.model_id('Yarasa Kedi')
+        self.assertEqual(set(data['created']), {juttuli, bat})
+        for model_id in (juttuli, bat):
+            self.assertTrue(self.library.user(model_id)['hidden'])
+        self.assertEqual(self.library.effective(bat)['title'], 'Yarasa: Kedi')
+        self.assertEqual(self.library.record(bat)['image_count'], 1)
+        self.assertEqual(self.library.record(juttuli)['file_count'], 2)
+        self.assertEqual(sorted(entry['name'] for entry in self.library.record(self.source)['files']), ['Kapak.stl', 'Kutu kopyası.stl'])
+        visitor = self.flask_app.test_client()
+        self.assertNotIn(juttuli, {model['id'] for model in visitor.get('/api/library').get_json()['models']})
+
+    def test_move_to_existing_model_and_trash_copy_removes_empty_source(self):
+        share = self.post(f'/api/models/{self.source}/shares', {}).get_json()
+        result = self.organize({
+            'groups': [{'title': 'Juttuli', 'files': ['Karışık/Amazing Juttuli.stl', 'Karışık/Amazing Juttuli (1).stl', 'Karışık/Bat-Cat-Easy.stl']}],
+            'moves': [{'target': self.model_id('Kutu'), 'files': ['Karışık/Kapak.stl']}],
+            'trash': ['Karışık/Kutu kopyası.stl'],
+        })
+        self.assertEqual(result.status_code, 200, result.get_json())
+        data = result.get_json()
+        self.assertIsNone(data['source'])
+        self.assertEqual(data['trashed'], 1)
+        self.assertFalse(self.bundle.exists())
+        juttuli = self.model_id('Juttuli')
+        self.assertEqual(self.library.record(juttuli)['image_count'], 1, 'kalan görsel ilk yeni modele gider')
+        self.assertEqual(self.library.record(self.model_id('Kutu'))['file_count'], 2)
+        self.assertEqual(self.library.db['shares'][share['token']]['model_id'], juttuli)
+        self.assertNotIn(self.source, self.library.db['models'])
+        self.assertTrue(list((self.data / '.trash').rglob('Kutu kopyası.stl')))
+
+    def test_rejects_invalid_plans(self):
+        cases = [
+            ({'groups': [{'title': 'X', 'files': ['Kutu/box.stl']}]}, 400),
+            ({'groups': [{'title': 'X', 'files': ['Karışık/Bat-Cat-Easy.png']}]}, 400),
+            ({'groups': [{'title': 'X', 'files': ['Karışık/Kapak.stl']}], 'trash': ['Karışık/Kapak.stl']}, 400),
+            ({'moves': [{'target': self.model_id('Anahtarlık.stl'), 'files': ['Karışık/Kapak.stl']}]}, 400),
+            ({'moves': [{'target': self.source, 'files': ['Karışık/Kapak.stl']}]}, 400),
+            ({}, 400),
+        ]
+        for payload, status in cases:
+            with self.subTest(payload=payload):
+                self.assertEqual(self.organize(payload).status_code, status)
+        self.assertEqual(len(self.library.record(self.source)['files']), 5)
+
+    def test_editor_cannot_trash_files(self):
+        self.library.create_user('editor1', 'Editor.Sifre1', role='editor')
+        editor = self.flask_app.test_client()
+        csrf = self.fresh_csrf(editor)
+        csrf = self.post('/api/auth/login', {'username': 'editor1', 'password': 'Editor.Sifre1'}, client=editor, csrf=csrf).get_json()['csrf']
+        response = self.post(f'/api/models/{self.source}/organize', {'trash': ['Karışık/Kapak.stl']}, client=editor, csrf=csrf)
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(editor.get(f'/api/models/{self.source}/organize').get_json()['canTrash'])
+        # 18+ modeller editörden gizliyse ne düzenlenebilir ne de kopya listesinde adı görünür.
+        self.library.update_model(self.model_id('Kutu'), {'nsfw': True})
+        info = editor.get(f'/api/models/{self.source}/organize').get_json()
+        copy = next(item for item in info['files'] if item['name'] == 'Kutu kopyası.stl')
+        self.assertNotIn(self.model_id('Kutu'), {item['modelId'] for item in copy['copies']})
+        self.assertEqual(editor.get(f"/api/models/{self.model_id('Kutu')}/organize").status_code, 404)
+        response = self.post(f'/api/models/{self.source}/organize', {'moves': [{'target': self.model_id('Kutu'), 'files': ['Karışık/Kapak.stl']}]}, client=editor, csrf=csrf)
+        self.assertEqual(response.status_code, 400)
+
+
+class UploadGroupTests(UploadTests):
+    def test_groups_create_separate_models_and_skip_existing_copies(self):
+        self.login()
+        files = [('juttuli.stl', cube_stl_bytes(14)), ('juttuli (1).stl', cube_stl_bytes(15)),
+                 ('bat.stl', cube_stl_bytes(16)), ('kopya.stl', (self.models / 'Kutu' / 'box.stl').read_bytes())]
+        response = self.upload(files, {
+            'groups': [{'title': 'Juttuli', 'files': [0, 1]}, {'title': 'Yarasa', 'files': [2]}, {'title': 'Kopya', 'files': [3]}],
+            'skip_duplicates': True, 'hidden': True,
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        self.assertEqual(sorted(model['title'] for model in data['models']), ['Juttuli', 'Yarasa'])
+        self.assertTrue(all(model['hidden'] for model in data['models']))
+        self.assertEqual(data['skipped'][0]['name'], 'kopya.stl')
+        self.assertIn(self.model_id('Kutu'), {model['id'] for model in data['skipped'][0]['models']})
+        self.assertFalse((self.models / 'Kopya').exists())
+        self.assertEqual(self.library.record(self.model_id('Juttuli'))['file_count'], 2)
+
+    def test_all_copies_return_empty_result_instead_of_error(self):
+        self.login()
+        response = self.upload([('ayni.stl', (self.models / 'Kutu' / 'box.stl').read_bytes())], {'skip_duplicates': True})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual((response.get_json()['models'], len(response.get_json()['skipped'])), ([], 1))
+
+    def test_invalid_groups_are_rejected(self):
+        self.login()
+        response = self.upload([('a.stl', cube_stl_bytes(3))], {'groups': [{'title': 'A', 'files': [0, 0]}]})
+        self.assertEqual(response.status_code, 400)
+
+
+class PartThumbTests(ApiTestCase):
+    def test_part_thumbnail_is_queued_then_served_and_respects_visibility(self):
+        write_stl(self.models / 'Kutu' / 'kapak.stl', 7)
+        self.library.scan()
+        url = '/api/part-thumb/Kutu/kapak.stl'
+        with patch.object(self.library, '_part_loop'):
+            first = self.client.get(url)
+            self.assertEqual(first.status_code, 202)
+            job = self.library._part_queue.popleft()
+        self.assertTrue(self.library.run_part_job(job)['thumb'])
+        second = self.client.get(url)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.mimetype, 'image/webp')
+        second.close()
+        detail = self.client.get(f"/api/models/{self.model_id('Kutu')}").get_json()
+        self.assertTrue(all(item['thumbUrl'].startswith('/api/part-thumb/') for item in detail['files']))
+        self.library.update_model(self.model_id('Kutu'), {'hidden': True})
+        self.assertEqual(self.flask_app.test_client().get(url).status_code, 404)
+
+
 class DatabaseTests(unittest.TestCase):
     def test_v1_database_is_migrated_with_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
