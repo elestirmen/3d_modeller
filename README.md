@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.png" alt="3d_modeller simgesi" width="120"></p>
+
 # 3D Model Arşivi
 
 `3d models/` klasörünü tarayıp modelleri otomatik kategorilere ayıran, sunucu tarafında önizleme üreten ve tarayıcıda 3D gösteren kişisel model arşivi. Ziyaretçiler arşivi gezer; yönetici girişiyle yükleme, düzenleme, gizleme ve paylaşım bağlantısı oluşturma yapılır.
